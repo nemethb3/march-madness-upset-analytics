@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from components.bootstrap import ensure_repo_root_on_path
+
+ensure_repo_root_on_path()
+
 import streamlit as st
 
 from components.charts import title_odds_chart

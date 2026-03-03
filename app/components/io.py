@@ -13,7 +13,11 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+from components.bootstrap import ensure_repo_root_on_path
 from components.text import simulation_effort_to_n_sims
+
+ensure_repo_root_on_path()
+
 from src.build_round1_from_slots import build_round1_matchups_from_frames
 from src.inference_utils import (
     apply_temperature_scaling,

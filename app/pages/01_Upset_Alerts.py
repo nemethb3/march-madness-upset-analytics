@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from components.bootstrap import ensure_repo_root_on_path
+
+ensure_repo_root_on_path()
+
 import pandas as pd
 import streamlit as st
 
