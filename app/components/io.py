@@ -279,14 +279,17 @@ def score_matchups_df(matchups_df: pd.DataFrame, ctx: dict[str, Any], top_k: int
             underdog, favorite = rec.get("TeamAName"), rec.get("TeamBName")
             upset = p_a
             underdog_seed, favorite_seed = seed_a, seed_b
+            underdog_id, favorite_id = int(rec.get("TeamAID")), int(rec.get("TeamBID"))
         elif seed_b > seed_a:
             underdog, favorite = rec.get("TeamBName"), rec.get("TeamAName")
             upset = p_b
             underdog_seed, favorite_seed = seed_b, seed_a
+            underdog_id, favorite_id = int(rec.get("TeamBID")), int(rec.get("TeamAID"))
         else:
             underdog, favorite = rec.get("TeamAName"), rec.get("TeamBName")
             upset = np.nan
             underdog_seed, favorite_seed = seed_a, seed_b
+            underdog_id, favorite_id = int(rec.get("TeamAID")), int(rec.get("TeamBID"))
 
         rec["P_TeamAWin"] = p_a
         rec["P_TeamBWin"] = p_b
@@ -295,6 +298,8 @@ def score_matchups_df(matchups_df: pd.DataFrame, ctx: dict[str, Any], top_k: int
         rec["Favorite"] = favorite
         rec["UnderdogSeed"] = underdog_seed
         rec["FavoriteSeed"] = favorite_seed
+        rec["UnderdogID"] = underdog_id
+        rec["FavoriteID"] = favorite_id
         rec["WorseSeedTeam"] = underdog
         rec["RecommendedPick"] = rec.get("TeamAName") if p_a >= p_b else rec.get("TeamBName")
         rec["Confidence"] = max(p_a, p_b)
@@ -311,7 +316,14 @@ def score_matchups_df(matchups_df: pd.DataFrame, ctx: dict[str, Any], top_k: int
         for k in range(top_k):
             rec[f"Factor{k+1}"] = rec["_factors"][k] if k < len(rec["_factors"]) else "N/A"
 
-        rec["Reasons"] = build_underdog_reasons(pd.Series(rec), feature_diffs=rec.get("_full_features"))
+        rec["Reasons"] = build_underdog_reasons(
+            underdog_team_id=underdog_id,
+            favorite_team_id=favorite_id,
+            season=int(ctx["season"]),
+            team_features_df=ctx["team_features_df"],
+            feature_labels=None,
+            max_reasons=5,
+        )
 
     return pd.DataFrame(records)
 

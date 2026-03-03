@@ -59,7 +59,9 @@ def normalize_alerts_df(df: pd.DataFrame) -> pd.DataFrame:
             out["Season"] = ctx["season"]
 
         required = ["Season", "SeedPair", "Favorite", "Underdog", "FavoriteSeed", "UnderdogSeed", "UpsetProb"]
-        return out[required + [c for c in out.columns if c not in required]]
+        out = out[required + [c for c in out.columns if c not in required]]
+        out = out.loc[:, ~out.columns.duplicated()].copy()
+        return out
 
     schema_b = {"TeamAName", "TeamBName", "TeamASeedNum", "TeamBSeedNum", "P_TeamAWin", "P_TeamBWin", "WorseSeedTeam"}
     if schema_b.issubset(out.columns):
@@ -78,7 +80,9 @@ def normalize_alerts_df(df: pd.DataFrame) -> pd.DataFrame:
             out["Season"] = ctx["season"]
 
         required = ["Season", "SeedPair", "Favorite", "Underdog", "FavoriteSeed", "UnderdogSeed", "UpsetProb"]
-        return out[required + [c for c in out.columns if c not in required]]
+        out = out[required + [c for c in out.columns if c not in required]]
+        out = out.loc[:, ~out.columns.duplicated()].copy()
+        return out
 
     st.error(f"Upset alerts data missing required columns. Found: {sorted(df.columns.tolist())}")
     st.stop()
@@ -152,7 +156,7 @@ with tabs[0]:
 with tabs[1]:
     top10 = view.nlargest(10, "UpsetProb")
     if not top10.empty:
-        st.plotly_chart(upset_bar_chart(top10.rename(columns={"Underdog": "TeamAName", "Favorite": "TeamBName"})), use_container_width=True)
+        st.plotly_chart(upset_bar_chart(top10), use_container_width=True)
     hist_df = view[["UpsetProb"]].copy()
     if not hist_df.empty:
         st.plotly_chart(upset_histogram(hist_df), use_container_width=True)
@@ -161,4 +165,3 @@ with st.expander("What does this mean?"):
     st.write(
         "These cards rank the most plausible Round 1 upsets. Higher upset chance means the underdog has a stronger path to winning."
     )
-

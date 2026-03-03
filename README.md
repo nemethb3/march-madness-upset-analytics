@@ -100,3 +100,12 @@ To add a new season for the dashboard:
 5. Push to GitHub.
 
 Streamlit Community Cloud redeploys automatically after push.
+
+### Synthetic Demo Season
+- `data/app/2026/` is synthetic demo data for UI testing.
+- It is not real tournament data and should not be used for real forecasting decisions.
+
+Regenerate synthetic 2026 demo bundle:
+```bash
+python tools/generate_demo_season.py --source_season 2025 --target_season 2026 --seed 42
+```
