@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-from app.components.text import simulation_effort_to_n_sims
+from components.text import simulation_effort_to_n_sims
 from src.build_round1_from_slots import build_round1_matchups_from_frames
 from src.inference_utils import (
     apply_temperature_scaling,
@@ -498,4 +498,3 @@ def run_simulation_cached(
         )
     matchup_df = pd.DataFrame(matchup_rows).sort_values("Frequency", ascending=False).reset_index(drop=True)
     return adv_df, matchup_df
-

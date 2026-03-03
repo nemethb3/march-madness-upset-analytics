@@ -5,8 +5,8 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
-from app.components.charts import upset_bar_chart, upset_histogram
-from app.components.io import build_round1_df, render_sidebar, score_round1_matchups
+from components.charts import upset_bar_chart, upset_histogram
+from components.io import build_round1_df, render_sidebar, score_round1_matchups
 
 st.set_page_config(page_title="Upset Alerts", page_icon="🚨", layout="wide")
 ctx = render_sidebar()
@@ -54,4 +54,3 @@ with st.expander("What does this mean?"):
     st.write(
         "Upset probability is the chance the worse-seeded team wins. Sort by UpsetProb to find the most likely upsets."
     )
-

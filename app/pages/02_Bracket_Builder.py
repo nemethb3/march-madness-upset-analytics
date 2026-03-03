@@ -6,8 +6,8 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-from app.components.io import build_round1_df, render_sidebar, score_round1_matchups
-from app.components.text import pretty_factor
+from components.io import build_round1_df, render_sidebar, score_round1_matchups
+from components.text import pretty_factor
 
 st.set_page_config(page_title="Bracket Builder", page_icon="🧩", layout="wide")
 ctx = render_sidebar()
@@ -80,4 +80,3 @@ with st.expander("What does this mean?"):
         "Auto-pick selects favorites by default, then flips to underdogs when upset probability crosses your "
         "risk-adjusted threshold."
     )
-

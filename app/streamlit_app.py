@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import streamlit as st
 
-from app.components.io import render_sidebar
+from components.io import render_sidebar
 
 st.set_page_config(page_title="March Madness Analytics", page_icon="🏀", layout="wide")
 
@@ -33,4 +33,3 @@ with st.expander("What does this mean?"):
         "The app computes matchup-specific probabilities from your selected model (or a demo heuristic fallback), "
         "then uses those probabilities to generate upset alerts and tournament simulations."
     )
-

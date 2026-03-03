@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import streamlit as st
 
-from app.components.charts import title_odds_chart
-from app.components.io import render_sidebar, run_simulation_cached
+from components.charts import title_odds_chart
+from components.io import render_sidebar, run_simulation_cached
 
 st.set_page_config(page_title="Simulations", page_icon="🎲", layout="wide")
 ctx = render_sidebar()
@@ -64,4 +64,3 @@ with st.expander("What does this mean?"):
         "Simulations advance winners through actual bracket slots. Each game probability depends on the real "
         "opponent reached in that simulation path."
     )
-
