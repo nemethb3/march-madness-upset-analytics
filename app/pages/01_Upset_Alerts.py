@@ -33,6 +33,68 @@ if scored.empty:
     st.error("No valid matchups could be scored for this season bundle.")
     st.stop()
 
+
+def normalize_alerts_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize alerts dataframe into a stable schema for UI rendering."""
+    out = df.copy()
+
+    has_schema_a = {"Underdog", "Favorite", "UnderdogSeed", "FavoriteSeed"}.issubset(out.columns)
+    if has_schema_a:
+        if "UpsetProb" not in out.columns or out["UpsetProb"].isna().all():
+            if "P_UnderdogWin" in out.columns:
+                out["UpsetProb"] = out["P_UnderdogWin"]
+            elif {"P_TeamAWin", "P_TeamBWin", "Underdog", "TeamAName", "TeamBName"}.issubset(out.columns):
+                out["UpsetProb"] = np.where(
+                    out["Underdog"] == out["TeamAName"],
+                    out["P_TeamAWin"],
+                    np.where(out["Underdog"] == out["TeamBName"], out["P_TeamBWin"], np.nan),
+                )
+
+        if "SeedPair" not in out.columns:
+            out["SeedPair"] = out.apply(
+                lambda r: f"{min(int(r['FavoriteSeed']), int(r['UnderdogSeed']))}-{max(int(r['FavoriteSeed']), int(r['UnderdogSeed']))}",
+                axis=1,
+            )
+        if "Season" not in out.columns:
+            out["Season"] = ctx["season"]
+
+        required = ["Season", "SeedPair", "Favorite", "Underdog", "FavoriteSeed", "UnderdogSeed", "UpsetProb"]
+        return out[required + [c for c in out.columns if c not in required]]
+
+    schema_b = {"TeamAName", "TeamBName", "TeamASeedNum", "TeamBSeedNum", "P_TeamAWin", "P_TeamBWin", "WorseSeedTeam"}
+    if schema_b.issubset(out.columns):
+        out["Underdog"] = out["WorseSeedTeam"]
+        out["Favorite"] = np.where(out["Underdog"] == out["TeamAName"], out["TeamBName"], out["TeamAName"])
+        out["UnderdogSeed"] = out[["TeamASeedNum", "TeamBSeedNum"]].max(axis=1)
+        out["FavoriteSeed"] = out[["TeamASeedNum", "TeamBSeedNum"]].min(axis=1)
+        out["UpsetProb"] = np.where(
+            out["Underdog"] == out["TeamAName"],
+            out["P_TeamAWin"],
+            np.where(out["Underdog"] == out["TeamBName"], out["P_TeamBWin"], np.nan),
+        )
+        if "SeedPair" not in out.columns:
+            out["SeedPair"] = out.apply(lambda r: f"{int(r['FavoriteSeed'])}-{int(r['UnderdogSeed'])}", axis=1)
+        if "Season" not in out.columns:
+            out["Season"] = ctx["season"]
+
+        required = ["Season", "SeedPair", "Favorite", "Underdog", "FavoriteSeed", "UnderdogSeed", "UpsetProb"]
+        return out[required + [c for c in out.columns if c not in required]]
+
+    st.error(f"Upset alerts data missing required columns. Found: {sorted(df.columns.tolist())}")
+    st.stop()
+
+
+before_cols = scored.columns.tolist()
+scored = normalize_alerts_df(scored)
+after_cols = scored.columns.tolist()
+
+if "Reasons" not in scored.columns:
+    scored["Reasons"] = [[] for _ in range(len(scored))]
+
+with st.sidebar.expander("Upset Alerts Debug"):
+    st.write({"columns_before_normalize": before_cols, "columns_after_normalize": after_cols})
+
+
 def _alert_level(p: float) -> str:
     if p >= 0.30:
         return "High"
@@ -44,13 +106,10 @@ def _alert_level(p: float) -> str:
 
 
 scored["AlertLevel"] = scored["UpsetProb"].map(_alert_level)
-scored["SeedMatchup"] = scored.apply(
-    lambda r: f"{min(int(r['TeamASeedNum']), int(r['TeamBSeedNum']))} vs {max(int(r['TeamASeedNum']), int(r['TeamBSeedNum']))}",
-    axis=1,
-)
+scored["SeedMatchup"] = scored.apply(lambda r: f"{int(r['FavoriteSeed'])} vs {int(r['UnderdogSeed'])}", axis=1)
 
 f1, f2 = st.columns([2, 1])
-seed_options = sorted(scored["SeedMatchup"].unique().tolist())
+seed_options = sorted(scored["SeedMatchup"].dropna().unique().tolist())
 seed_filter = f1.multiselect("Seed matchup filter", options=seed_options, default=seed_options)
 level_filter = f2.multiselect("Alert level", options=["High", "Medium", "Watch", "Low"], default=["High", "Medium", "Watch"])
 
@@ -62,6 +121,7 @@ tabs = st.tabs(["Alert Cards", "Charts"])
 with tabs[0]:
     if view.empty:
         st.info("No games match your current filters.")
+
     for _, row in view.iterrows():
         underdog = row["Underdog"]
         favorite = row["Favorite"]
