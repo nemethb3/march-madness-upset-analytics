@@ -85,5 +85,18 @@ streamlit run app/streamlit_app.py
 4. Deploy.
 
 The app supports:
-- **Upload Mode**: user uploads seeds/slots (+ optional team features).
-- **Demo Mode**: automatic fallback using files in `app/demo_data/`.
+- **Bundle Mode**: automatic loading from `data/app/{season}/`.
+- **Demo fallback**: if selected season bundle is incomplete.
+
+## Season Bundle Workflow (Maintainer)
+To add a new season for the dashboard:
+1. Download Kaggle data for that season.
+2. Run the feature pipeline locally so `team_season_features.csv` is generated.
+3. Create bundle folder:
+   - `data/app/{season}/seeds.csv`
+   - `data/app/{season}/slots.csv`
+   - `data/app/{season}/team_features.csv`
+4. Ensure `data/app/team_id_map.csv` includes `TeamID,TeamName` for teams in your bundles.
+5. Push to GitHub.
+
+Streamlit Community Cloud redeploys automatically after push.

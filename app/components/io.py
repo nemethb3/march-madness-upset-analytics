@@ -1,4 +1,4 @@
-"""Data loading, model loading, scoring, and simulation helpers for Streamlit app."""
+"""Core app I/O, scoring, bracket, and simulation helpers."""
 
 from __future__ import annotations
 
@@ -14,7 +14,8 @@ import pandas as pd
 import streamlit as st
 
 from components.bootstrap import ensure_repo_root_on_path
-from components.text import simulation_effort_to_n_sims
+from components.data_registry import BundleMissingError, list_available_seasons, load_season_bundle
+from components.explanations import build_underdog_reasons
 
 ensure_repo_root_on_path()
 
@@ -30,37 +31,25 @@ from src.inference_utils import (
     predict_team1_win_prob,
 )
 
-DEMO_DIR = Path("app/demo_data")
+ADV_STAGES = ["Round 1", "Round 2", "Sweet 16", "Elite 8", "Final Four", "Championship"]
 SEED_CODE_PATTERN = re.compile(r"^[WXYZ][0-9]{2}[ab]?$")
-ADV_STAGES = ["R32", "S16", "E8", "F4", "TitleGame", "Champion"]
 
 
 @st.cache_data
-def read_csv_bytes(file_name: str, file_bytes: bytes) -> pd.DataFrame:
-    """Read uploaded CSV bytes into dataframe (cached)."""
-    return pd.read_csv(pd.io.common.BytesIO(file_bytes))
-
-
-@st.cache_data
-def load_demo_csv(path_str: str) -> pd.DataFrame:
-    """Load demo CSV file (cached)."""
-    return pd.read_csv(path_str)
-
-
-@st.cache_data
-def load_local_csv(path_str: str) -> pd.DataFrame:
-    """Load local CSV by path (cached)."""
-    return pd.read_csv(path_str)
+def cached_load_bundle(season: int):
+    """Load season bundle with caching."""
+    bundle = load_season_bundle(season)
+    return bundle.seeds, bundle.slots, bundle.team_features, bundle.team_id_map
 
 
 @st.cache_resource
 def load_cached_model(path_str: str):
-    """Load model from disk with resource caching."""
+    """Load model with resource caching."""
     return load_model(Path(path_str))
 
 
-def discover_local_models() -> dict[str, Path]:
-    """Discover available model files and return label->path map."""
+def _model_candidates() -> dict[str, Path]:
+    """Discover model files in priority order."""
     models_dir = Path("outputs/models")
     out: dict[str, Path] = {}
     calibrated = models_dir / "logistic_regression_calibrated.joblib"
@@ -68,134 +57,128 @@ def discover_local_models() -> dict[str, Path]:
     if calibrated.exists():
         out["Logistic (Calibrated)"] = calibrated
     if pipeline.exists():
-        out["Logistic (Uncalibrated)"] = pipeline
+        out["Logistic (Base)"] = pipeline
     return out
 
 
-def model_hash_from_path(path: Path | None) -> str:
-    """Build model hash for cache keys."""
+def _n_sims_from_effort(effort: str) -> int:
+    """Map effort label to simulation count."""
+    mapping = {"Fast": 5000, "Balanced": 20000, "Thorough": 50000}
+    return mapping[effort]
+
+
+def _model_hash(path: Path | None) -> str:
+    """Create model fingerprint for cache keying."""
     if path is None or not path.exists():
         return "heuristic"
     stat = path.stat()
-    base = f"{path.resolve()}::{stat.st_mtime_ns}::{stat.st_size}"
-    return hashlib.md5(base.encode("utf-8")).hexdigest()
+    return hashlib.md5(f"{path.resolve()}::{stat.st_mtime_ns}::{stat.st_size}".encode("utf-8")).hexdigest()
 
 
-def _seed_num_from_code(seed_code: str) -> int:
-    """Parse numeric seed from seed code."""
-    m = re.search(r"\d+", str(seed_code))
-    if m is None:
-        raise ValueError(f"Could not parse seed number from {seed_code}")
-    return int(m.group(0))
-
-
-def _heuristic_p_team_a(seed_a: float, seed_b: float) -> float:
-    """Fallback seed-based probability when no model is available."""
+def _heuristic_prob(seed_a: float, seed_b: float) -> float:
+    """Seed-only fallback probability."""
     if pd.isna(seed_a) or pd.isna(seed_b):
         return 0.5
     x = (float(seed_b) - float(seed_a)) / 2.0
-    p = 1.0 / (1.0 + np.exp(-x))
-    return float(np.clip(p, 0.02, 0.98))
+    return float(np.clip(1.0 / (1.0 + np.exp(-x)), 0.02, 0.98))
 
 
 def render_sidebar() -> dict[str, Any]:
-    """Render global sidebar and return app context dictionary."""
-    st.sidebar.header("Data Mode")
-    up_seeds = st.sidebar.file_uploader("Upload MNCAATourneySeeds.csv", type=["csv"], key="up_seeds")
-    up_slots = st.sidebar.file_uploader("Upload MNCAATourneySlots.csv", type=["csv"], key="up_slots")
-    up_team_feats = st.sidebar.file_uploader(
-        "Upload team_season_features.csv (optional)", type=["csv"], key="up_team_feats"
-    )
+    """Render global controls and return app context."""
+    st.sidebar.header("Season")
+    available = list_available_seasons()
+    if not available:
+        st.error("No season bundles found in data/app/{season}.")
+        st.stop()
 
-    # Mode selection: if both required uploads are present use Upload Mode, otherwise Demo Mode.
-    if up_seeds is not None and up_slots is not None:
-        seeds_df = read_csv_bytes(up_seeds.name, up_seeds.getvalue())
-        slots_df = read_csv_bytes(up_slots.name, up_slots.getvalue())
-        mode = "Upload Mode"
-    else:
-        seeds_df = load_demo_csv(str(DEMO_DIR / "demo_seeds.csv"))
-        slots_df = load_demo_csv(str(DEMO_DIR / "demo_slots.csv"))
+    season = st.sidebar.selectbox("Season", options=available, index=len(available) - 1)
+
+    mode = "Bundle Mode"
+    try:
+        seeds_df, slots_df, team_features_df, team_id_map = cached_load_bundle(season)
+    except BundleMissingError:
+        demo_season = None
+        for s in sorted(available, reverse=True):
+            try:
+                seeds_df, slots_df, team_features_df, team_id_map = cached_load_bundle(s)
+                demo_season = s
+                break
+            except BundleMissingError:
+                continue
+        if demo_season is None:
+            st.error("No complete season bundles found in data/app/.")
+            st.stop()
         mode = "Demo Mode"
-
-    # Team features: upload > local processed > demo.
-    team_feats_msg = ""
-    if up_team_feats is not None:
-        team_features_df = read_csv_bytes(up_team_feats.name, up_team_feats.getvalue())
-    else:
-        local_feats = Path("data/processed/team_season_features.csv")
-        if local_feats.exists():
-            team_features_df = load_local_csv(str(local_feats))
-        else:
-            team_features_df = load_demo_csv(str(DEMO_DIR / "demo_team_features.csv"))
-            if mode == "Upload Mode":
-                team_feats_msg = "To run predictions, upload team_season_features.csv from your local pipeline output."
-
-    if team_feats_msg:
-        st.sidebar.info(team_feats_msg)
-
-    # Optional teams table for names
-    teams_df = None
-    local_teams = Path("data/raw/MTeams.csv")
-    if local_teams.exists():
-        teams_df = load_local_csv(str(local_teams))[["TeamID", "TeamName"]]
-    elif "TeamName" in team_features_df.columns:
-        teams_df = team_features_df[["TeamID", "TeamName"]].dropna().drop_duplicates()
+        st.warning("Season data not available yet. App running in demo mode.")
+        season = demo_season
+    except Exception as exc:
+        st.error(f"Bundle load failed: {exc}")
+        st.stop()
 
     st.sidebar.divider()
     st.sidebar.header("Controls")
-    seasons = sorted(pd.Series(seeds_df["Season"]).dropna().astype(int).unique().tolist())
-    default_season = seasons[-1]
-    season = st.sidebar.selectbox("Season", options=seasons, index=len(seasons) - 1)
-
-    model_options = discover_local_models()
-    option_labels = list(model_options.keys()) + ["Heuristic (No model file)"]
-    default_idx = 0 if option_labels else None
-    selected_model_label = st.sidebar.selectbox("Model", options=option_labels, index=default_idx)
-    model_path = model_options.get(selected_model_label)
-    model = load_cached_model(str(model_path)) if model_path is not None else None
-    required_features = infer_required_features(model) if model is not None else []
+    model_options = _model_candidates()
+    model_labels = list(model_options.keys())
+    if model_labels:
+        selected = st.sidebar.selectbox("Model", options=model_labels, index=0)
+        model_path = model_options[selected]
+        model = load_cached_model(str(model_path))
+        model_loaded = True
+        required_features = infer_required_features(model)
+    else:
+        model_path = None
+        model = None
+        model_loaded = False
+        required_features = []
 
     randomness = st.sidebar.slider("Randomness", min_value=0.75, max_value=1.0, value=0.85, step=0.01)
-    upset_threshold = st.sidebar.slider(
-        "Upset threshold",
-        min_value=0.10,
-        max_value=0.60,
-        value=0.30,
-        step=0.01,
-        help="Higher means fewer underdog picks.",
-    )
+    upset_threshold = st.sidebar.slider("Upset threshold", min_value=0.10, max_value=0.60, value=0.30, step=0.01)
     risk_tolerance = st.sidebar.slider("Risk tolerance", min_value=0.0, max_value=1.0, value=0.5, step=0.05)
-    effort_label = st.sidebar.selectbox("Simulation effort", options=["Fast", "Balanced", "Thorough"], index=1)
-    n_sims = simulation_effort_to_n_sims(effort_label)
+    effort = st.sidebar.selectbox("Simulation effort", options=["Fast", "Balanced", "Thorough"], index=1)
+    n_sims = min(_n_sims_from_effort(effort), 50000)
 
-    context = build_season_context_from_frames(
+    teams_df = team_id_map[["TeamID", "TeamName"]].copy()
+    season_ctx = build_season_context_from_frames(
         season=season,
         seeds_df=seeds_df,
         team_features_df=team_features_df,
         teams_df=teams_df,
     )
 
+    status = {
+        "model_loaded": model_loaded,
+        "season_bundle_loaded": True,
+        "feature_rows": len(team_features_df[team_features_df["Season"] == season]),
+        "seed_rows": len(seeds_df[seeds_df["Season"] == season]),
+        "slot_rows": len(slots_df[slots_df["Season"] == season]),
+        "mode": mode,
+        "model_file": str(model_path) if model_path else "None",
+    }
+    with st.sidebar.expander("Backend Status"):
+        st.write(status)
+
     return {
         "mode": mode,
+        "season": season,
         "seeds_df": seeds_df,
         "slots_df": slots_df,
         "team_features_df": team_features_df,
         "teams_df": teams_df,
-        "season": season,
         "model": model,
         "model_path": model_path,
-        "model_hash": model_hash_from_path(model_path),
+        "model_hash": _model_hash(model_path),
         "required_features": required_features,
         "randomness": randomness,
         "upset_threshold": upset_threshold,
         "risk_tolerance": risk_tolerance,
         "n_sims": n_sims,
-        "context": context,
+        "season_ctx": season_ctx,
+        "backend_status": status,
     }
 
 
 def build_round1_df(ctx: dict[str, Any]) -> pd.DataFrame:
-    """Build round1 matchups dataframe using in-memory data sources."""
+    """Build round1 matchups."""
     return build_round1_matchups_from_frames(
         slots_df=ctx["slots_df"],
         seeds_df=ctx["seeds_df"],
@@ -204,196 +187,301 @@ def build_round1_df(ctx: dict[str, Any]) -> pd.DataFrame:
     )
 
 
-def score_round1_matchups(round1_df: pd.DataFrame, ctx: dict[str, Any], top_k: int = 3) -> pd.DataFrame:
-    """Score round1 matchups with model probabilities and explanation factors."""
+def _seed_lookup_for_df(seeds_df: pd.DataFrame, season: int) -> dict[int, int]:
+    """TeamID -> SeedNum mapping."""
+    temp = seeds_df[seeds_df["Season"] == season].copy()
+    if "SeedNum" not in temp.columns:
+        col = "Seed" if "Seed" in temp.columns else "SeedStr"
+        temp["SeedNum"] = temp[col].astype(str).str.extract(r"(\d+)").astype(float)
+    temp = temp.dropna(subset=["SeedNum"])
+    return {int(r["TeamID"]): int(r["SeedNum"]) for _, r in temp.iterrows()}
+
+
+def score_matchups_df(matchups_df: pd.DataFrame, ctx: dict[str, Any], top_k: int = 3) -> pd.DataFrame:
+    """Score arbitrary matchup dataframe with TeamAID/TeamBID columns."""
     model = ctx["model"]
     required_features = ctx["required_features"]
-    season_ctx = ctx["context"]
+    season_ctx = ctx["season_ctx"]
+    seed_lookup = _seed_lookup_for_df(ctx["seeds_df"], ctx["season"])
 
     records: list[dict[str, Any]] = []
-    scored_indices: list[int] = []
-    scored_features: list[dict[str, Any]] = []
+    scored_idx: list[int] = []
+    scored_feats: list[dict[str, Any]] = []
 
-    for _, row in round1_df.iterrows():
-        rec = {
-            "Season": ctx["season"],
-            "Slot": row["Slot"],
-            "TeamAID": row["TeamAID"],
-            "TeamBID": row["TeamBID"],
-            "TeamAName": row["TeamAName"],
-            "TeamBName": row["TeamBName"],
-            "TeamASeedNum": row["TeamASeedNum"],
-            "TeamBSeedNum": row["TeamBSeedNum"],
-            "P_TeamAWin": np.nan,
-            "P_TeamBWin": np.nan,
-            "WorseSeedTeam": np.nan,
-            "UpsetProb": np.nan,
-            "RecommendedPick": np.nan,
-            "Confidence": np.nan,
-            "Error": "",
-        }
-        if pd.isna(row["TeamAID"]) or pd.isna(row["TeamBID"]):
-            rec["Error"] = "missing TeamID from seed mapping"
+    for _, row in matchups_df.iterrows():
+        rec = row.to_dict()
+        rec.setdefault("Error", "")
+        team_a = row.get("TeamAID")
+        team_b = row.get("TeamBID")
+        if pd.isna(team_a) or pd.isna(team_b):
+            rec["Error"] = "Unresolved matchup participants"
             records.append(rec)
             continue
 
-        team_a = int(row["TeamAID"])
-        team_b = int(row["TeamBID"])
+        team_a = int(team_a)
+        team_b = int(team_b)
         team1, team2 = (team_a, team_b) if team_a < team_b else (team_b, team_a)
+        rec["Team1ID"] = team1
+        rec["Team2ID"] = team2
+        rec["Team1Name"] = season_ctx.team_id_to_name.get(team1, f"Team {team1}")
+        rec["Team2Name"] = season_ctx.team_id_to_name.get(team2, f"Team {team2}")
+        rec["TeamASeedNum"] = seed_lookup.get(team_a, rec.get("TeamASeedNum", np.nan))
+        rec["TeamBSeedNum"] = seed_lookup.get(team_b, rec.get("TeamBSeedNum", np.nan))
 
         if model is None:
-            p_a = _heuristic_p_team_a(row["TeamASeedNum"], row["TeamBSeedNum"])
-            p_b = 1.0 - p_a
-            factors = [
-                f"Seed gap: {int(row['TeamASeedNum']) - int(row['TeamBSeedNum']):+d}",
-                "Model: heuristic",
-                "No model file detected",
-            ]
-            rec["_factors"] = factors
+            p_a = _heuristic_prob(rec["TeamASeedNum"], rec["TeamBSeedNum"])
             rec["_pA"] = p_a
-            rec["_pB"] = p_b
+            rec["_factors"] = ["Seed advantage", "Recent form edge", "Bracket volatility"]
             records.append(rec)
             continue
 
-        full_row, err = build_feature_row(team1, team2, season_ctx)
+        frow, err = build_feature_row(team1, team2, season_ctx)
         if err is not None:
             rec["Error"] = err
             records.append(rec)
             continue
-        missing = [f for f in required_features if f not in full_row or pd.isna(full_row[f])]
+        missing = [f for f in required_features if f not in frow or pd.isna(frow[f])]
         if missing:
             rec["Error"] = f"missing required model features: {missing[:6]}"
             records.append(rec)
             continue
 
-        scored_features.append({f: full_row[f] for f in required_features})
-        scored_indices.append(len(records))
         rec["_team_a"] = team_a
         rec["_team_b"] = team_b
+        rec["_full_features"] = frow
+        scored_feats.append({f: frow[f] for f in required_features})
+        scored_idx.append(len(records))
         records.append(rec)
 
-    if model is not None and scored_features:
-        x_df = pd.DataFrame(scored_features, columns=required_features)
+    if model is not None and scored_feats:
+        x_df = pd.DataFrame(scored_feats, columns=required_features)
         p_team1 = predict_team1_win_prob(model, x_df)
-        factor_rows = build_factor_strings(model, x_df, required_features, top_k=top_k)
-        for i, rec_idx in enumerate(scored_indices):
-            rec = records[rec_idx]
+        factors = build_factor_strings(model, x_df, required_features, top_k=top_k)
+        for i, idx in enumerate(scored_idx):
+            rec = records[idx]
             p_a, p_b = map_pair_probs(int(rec["_team_a"]), int(rec["_team_b"]), float(p_team1[i]))
             rec["_pA"] = p_a
             rec["_pB"] = p_b
-            rec["_factors"] = factor_rows[i]
+            rec["_factors"] = factors[i]
 
     for rec in records:
         if rec.get("Error"):
             for k in range(top_k):
                 rec[f"Factor{k+1}"] = "N/A"
             continue
+
         p_a = float(rec["_pA"])
-        p_b = float(rec["_pB"])
-        seed_a = int(rec["TeamASeedNum"])
-        seed_b = int(rec["TeamBSeedNum"])
+        p_b = float(1.0 - p_a)
+        seed_a = int(rec.get("TeamASeedNum", 99))
+        seed_b = int(rec.get("TeamBSeedNum", 99))
+
         if seed_a > seed_b:
-            worse = rec["TeamAName"]
+            underdog, favorite = rec.get("TeamAName"), rec.get("TeamBName")
             upset = p_a
+            underdog_seed, favorite_seed = seed_a, seed_b
         elif seed_b > seed_a:
-            worse = rec["TeamBName"]
+            underdog, favorite = rec.get("TeamBName"), rec.get("TeamAName")
             upset = p_b
+            underdog_seed, favorite_seed = seed_b, seed_a
         else:
-            worse = "TieSeed"
+            underdog, favorite = rec.get("TeamAName"), rec.get("TeamBName")
             upset = np.nan
+            underdog_seed, favorite_seed = seed_a, seed_b
 
         rec["P_TeamAWin"] = p_a
         rec["P_TeamBWin"] = p_b
-        rec["WorseSeedTeam"] = worse
         rec["UpsetProb"] = upset
-        rec["RecommendedPick"] = rec["TeamAName"] if p_a >= p_b else rec["TeamBName"]
+        rec["Underdog"] = underdog
+        rec["Favorite"] = favorite
+        rec["UnderdogSeed"] = underdog_seed
+        rec["FavoriteSeed"] = favorite_seed
+        rec["WorseSeedTeam"] = underdog
+        rec["RecommendedPick"] = rec.get("TeamAName") if p_a >= p_b else rec.get("TeamBName")
         rec["Confidence"] = max(p_a, p_b)
-        rec["SeedPair"] = f"{min(seed_a, seed_b)}-{max(seed_a, seed_b)}"
+
+        if upset >= 0.30:
+            rec["AlertLevel"] = "High"
+        elif upset >= 0.20:
+            rec["AlertLevel"] = "Medium"
+        elif upset >= 0.15:
+            rec["AlertLevel"] = "Watch"
+        else:
+            rec["AlertLevel"] = "Low"
+
         for k in range(top_k):
             rec[f"Factor{k+1}"] = rec["_factors"][k] if k < len(rec["_factors"]) else "N/A"
 
-    out = pd.DataFrame(records)
-    keep_cols = [
-        "Season",
-        "Slot",
-        "TeamAID",
-        "TeamBID",
-        "TeamAName",
-        "TeamBName",
-        "TeamASeedNum",
-        "TeamBSeedNum",
-        "SeedPair",
-        "P_TeamAWin",
-        "P_TeamBWin",
-        "WorseSeedTeam",
-        "UpsetProb",
-        "RecommendedPick",
-        "Confidence",
-        "Factor1",
-        "Factor2",
-        "Factor3",
-        "Error",
-    ]
-    for c in keep_cols:
-        if c not in out.columns:
-            out[c] = np.nan if c != "Error" else ""
-    return out[keep_cols].sort_values("Slot").reset_index(drop=True)
+        rec["Reasons"] = build_underdog_reasons(pd.Series(rec), feature_diffs=rec.get("_full_features"))
+
+    return pd.DataFrame(records)
 
 
-def _load_seed_to_team(seeds_df: pd.DataFrame, season: int) -> dict[str, int]:
-    """Build seed code to TeamID map."""
-    seed_col = "Seed" if "Seed" in seeds_df.columns else "SeedStr"
-    s = seeds_df[seeds_df["Season"] == season][[seed_col, "TeamID"]]
-    return {str(r[seed_col]): int(r["TeamID"]) for _, r in s.iterrows()}
+def score_round1_matchups(round1_df: pd.DataFrame, ctx: dict[str, Any], top_k: int = 3) -> pd.DataFrame:
+    """Score round1 matchups."""
+    return score_matchups_df(round1_df.copy(), ctx, top_k=top_k)
 
 
-def _slot_order(slots_df: pd.DataFrame, seed_to_team: dict[str, int], season: int) -> tuple[list[str], dict[str, dict[str, str]]]:
-    """Return topological slot order and slot map."""
-    slots_s = slots_df[slots_df["Season"] == season][["Slot", "StrongSeed", "WeakSeed"]].copy()
-    remaining = slots_s.set_index("Slot")[["StrongSeed", "WeakSeed"]].to_dict(orient="index")
-    available = set(seed_to_team.keys())
+def get_slot_structure(ctx: dict[str, Any]) -> tuple[list[str], dict[str, dict[str, str]], dict[str, str], dict[str, str]]:
+    """Return ordered slots, slot map, round map, and region map."""
+    slots = ctx["slots_df"][ctx["slots_df"]["Season"] == ctx["season"]][["Slot", "StrongSeed", "WeakSeed"]].copy()
+    seed_col = "Seed" if "Seed" in ctx["seeds_df"].columns else "SeedStr"
+    seeds = ctx["seeds_df"][ctx["seeds_df"]["Season"] == ctx["season"]][[seed_col, "TeamID"]]
+    seed_tokens = set(seeds[seed_col].astype(str).tolist())
+
+    rem = slots.set_index("Slot")[["StrongSeed", "WeakSeed"]].to_dict(orient="index")
     ordered: list[str] = []
-    while remaining:
+    available = set(seed_tokens)
+    while rem:
         progressed = False
-        for slot in list(remaining.keys()):
-            strong = str(remaining[slot]["StrongSeed"])
-            weak = str(remaining[slot]["WeakSeed"])
-            if strong in available and weak in available:
+        for slot in list(rem.keys()):
+            s = str(rem[slot]["StrongSeed"])
+            w = str(rem[slot]["WeakSeed"])
+            if s in available and w in available:
                 ordered.append(slot)
                 available.add(slot)
-                del remaining[slot]
+                del rem[slot]
                 progressed = True
         if not progressed:
-            raise ValueError("Could not resolve slot order from uploaded slots.")
-    return ordered, slots_s.set_index("Slot")[["StrongSeed", "WeakSeed"]].to_dict(orient="index")
+            break
+    slot_map = slots.set_index("Slot")[["StrongSeed", "WeakSeed"]].to_dict(orient="index")
 
-
-def _depth_round_map(ordered: list[str], slot_map: dict[str, dict[str, str]], seed_to_team: dict[str, int]) -> dict[str, str]:
-    """Map each slot to round label based on dependency depth."""
     depth: dict[str, int] = {}
     for slot in ordered:
-        strong = str(slot_map[slot]["StrongSeed"])
-        weak = str(slot_map[slot]["WeakSeed"])
-        ds = 0 if strong in seed_to_team else depth[strong]
-        dw = 0 if weak in seed_to_team else depth[weak]
+        s = str(slot_map[slot]["StrongSeed"])
+        w = str(slot_map[slot]["WeakSeed"])
+        ds = 0 if s in seed_tokens else depth.get(s, 0)
+        dw = 0 if w in seed_tokens else depth.get(w, 0)
         depth[slot] = 1 + max(ds, dw)
     uniq = sorted(set(depth.values()))
-    stages = ADV_STAGES[-len(uniq) :] if len(uniq) <= len(ADV_STAGES) else ADV_STAGES
-    mapping = {d: stages[i] for i, d in enumerate(uniq[-len(stages) :])}
-    return {slot: mapping.get(d, f"Round{d}") for slot, d in depth.items()}
+    stage_map = {d: ADV_STAGES[min(i, len(ADV_STAGES) - 1)] for i, d in enumerate(uniq)}
+    round_map = {slot: stage_map.get(depth.get(slot, 1), "Round 1") for slot in slot_map}
+
+    seed_region = {str(s): str(s)[0] for s in seed_tokens if SEED_CODE_PATTERN.match(str(s))}
+
+    def token_region(token: str) -> str:
+        if token in seed_region:
+            return seed_region[token]
+        if token in slot_map:
+            left = token_region(str(slot_map[token]["StrongSeed"]))
+            right = token_region(str(slot_map[token]["WeakSeed"]))
+            return left if left == right else "National"
+        return "National"
+
+    region_map = {slot: token_region(slot) if slot in slot_map else "National" for slot in slot_map}
+    return ordered, slot_map, round_map, region_map
 
 
-def _pair_upset_prob(team_a: int, team_b: int, p_a: float, ctx: Any) -> float:
-    """Compute upset probability for a matchup using team-order probability."""
-    seed_a = ctx.seed_lookup.get(team_a)
-    seed_b = ctx.seed_lookup.get(team_b)
-    if seed_a is None or seed_b is None:
-        return np.nan
-    if seed_a > seed_b:
-        return p_a
-    if seed_b > seed_a:
-        return 1.0 - p_a
-    return np.nan
+def resolve_bracket_state(ctx: dict[str, Any], picks: dict[str, int]) -> pd.DataFrame:
+    """Resolve slot participants and optional pick outcomes for all rounds."""
+    ordered, slot_map, round_map, region_map = get_slot_structure(ctx)
+    seed_col = "Seed" if "Seed" in ctx["seeds_df"].columns else "SeedStr"
+    seeds = ctx["seeds_df"][ctx["seeds_df"]["Season"] == ctx["season"]][[seed_col, "TeamID"]].copy()
+    seed_to_team = {str(r[seed_col]): int(r["TeamID"]) for _, r in seeds.iterrows()}
+    seed_lookup = _seed_lookup_for_df(ctx["seeds_df"], ctx["season"])
+    names = dict(zip(ctx["teams_df"]["TeamID"], ctx["teams_df"]["TeamName"]))
+
+    rows: list[dict[str, Any]] = []
+    winners: dict[str, int] = {}
+
+    def token_display(token: str) -> str:
+        if token in seed_to_team:
+            tid = seed_to_team[token]
+            return f"({seed_lookup.get(tid, '?')}) {names.get(tid, f'Team {tid}')}"
+        if token in slot_map:
+            return f"Winner of {token}"
+        return token
+
+    for slot in ordered:
+        strong_t = str(slot_map[slot]["StrongSeed"])
+        weak_t = str(slot_map[slot]["WeakSeed"])
+
+        team_a = seed_to_team.get(strong_t, winners.get(strong_t))
+        team_b = seed_to_team.get(weak_t, winners.get(weak_t))
+        row = {
+            "Slot": slot,
+            "Round": round_map.get(slot, "Round 1"),
+            "Region": region_map.get(slot, "National"),
+            "TeamAID": team_a,
+            "TeamBID": team_b,
+            "TeamADisplay": token_display(strong_t) if team_a is None else f"({seed_lookup.get(team_a, '?')}) {names.get(team_a, f'Team {team_a}')}",
+            "TeamBDisplay": token_display(weak_t) if team_b is None else f"({seed_lookup.get(team_b, '?')}) {names.get(team_b, f'Team {team_b}')}",
+        }
+
+        if team_a is not None and team_b is not None:
+            scored = score_matchups_df(
+                pd.DataFrame(
+                    [
+                        {
+                            "Slot": slot,
+                            "TeamAID": team_a,
+                            "TeamBID": team_b,
+                            "TeamAName": names.get(team_a, f"Team {team_a}"),
+                            "TeamBName": names.get(team_b, f"Team {team_b}"),
+                            "TeamASeedNum": seed_lookup.get(team_a, np.nan),
+                            "TeamBSeedNum": seed_lookup.get(team_b, np.nan),
+                        }
+                    ]
+                ),
+                ctx,
+                top_k=3,
+            ).iloc[0]
+            for c in [
+                "UpsetProb",
+                "RecommendedPick",
+                "Confidence",
+                "Factor1",
+                "Factor2",
+                "Factor3",
+                "Error",
+                "Reasons",
+                "WorseSeedTeam",
+                "Underdog",
+                "Favorite",
+                "UnderdogSeed",
+                "FavoriteSeed",
+            ]:
+                row[c] = scored.get(c)
+
+            picked = picks.get(slot)
+            if picked is None:
+                row["PickName"] = ""
+            else:
+                row["PickName"] = names.get(picked, f"Team {picked}")
+                winners[slot] = int(picked)
+        else:
+            row["UpsetProb"] = np.nan
+            row["RecommendedPick"] = ""
+            row["Confidence"] = np.nan
+            row["Factor1"] = row["Factor2"] = row["Factor3"] = ""
+            row["Reasons"] = []
+            row["Error"] = ""
+            row["PickName"] = ""
+        rows.append(row)
+
+    return pd.DataFrame(rows)
+
+
+def auto_pick_bracket(ctx: dict[str, Any], threshold: float) -> dict[str, int]:
+    """Auto-pick bracket favoring favorites unless upset probability exceeds threshold."""
+    picks: dict[str, int] = {}
+    bracket_df = resolve_bracket_state(ctx, picks={})
+    names = dict(zip(ctx["teams_df"]["TeamID"], ctx["teams_df"]["TeamName"]))
+    for _, r in bracket_df.iterrows():
+        if pd.isna(r["TeamAID"]) or pd.isna(r["TeamBID"]):
+            continue
+        team_a = int(r["TeamAID"])
+        team_b = int(r["TeamBID"])
+        if pd.notna(r["UpsetProb"]) and float(r["UpsetProb"]) >= threshold and pd.notna(r.get("WorseSeedTeam")):
+            pick_name = str(r.get("WorseSeedTeam"))
+        else:
+            pick_name = str(r.get("RecommendedPick", ""))
+        if pick_name == names.get(team_a):
+            picks[str(r["Slot"])] = team_a
+        elif pick_name == names.get(team_b):
+            picks[str(r["Slot"])] = team_b
+        else:
+            picks[str(r["Slot"])] = team_a if team_a < team_b else team_b
+    return picks
 
 
 @st.cache_data
@@ -405,100 +493,140 @@ def run_simulation_cached(
     seeds_df: pd.DataFrame,
     slots_df: pd.DataFrame,
     team_features_df: pd.DataFrame,
-    teams_df: pd.DataFrame | None,
+    teams_df: pd.DataFrame,
     model_path_str: str | None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Run path-dependent Monte Carlo simulation with cacheable inputs."""
+    """Run Monte Carlo simulation with cached inputs."""
     model = load_cached_model(model_path_str) if model_path_str else None
-    required_features = infer_required_features(model) if model is not None else []
+    required = infer_required_features(model) if model is not None else []
     season_ctx = build_season_context_from_frames(season, seeds_df, team_features_df, teams_df=teams_df)
+    names = dict(zip(teams_df["TeamID"], teams_df["TeamName"]))
 
-    seed_to_team = _load_seed_to_team(seeds_df, season)
-    ordered, slot_map = _slot_order(slots_df, seed_to_team, season)
-    round_map = _depth_round_map(ordered, slot_map, seed_to_team)
-    seeded_teams = sorted(set(seed_to_team.values()))
+    seed_col = "Seed" if "Seed" in seeds_df.columns else "SeedStr"
+    s = seeds_df[seeds_df["Season"] == season][[seed_col, "TeamID"]]
+    seed_to_team = {str(r[seed_col]): int(r["TeamID"]) for _, r in s.iterrows()}
+    seed_lookup = _seed_lookup_for_df(seeds_df, season)
 
-    pair_cache: dict[tuple[int, int], float] = {}
-    if model is not None and required_features:
+    slots = slots_df[slots_df["Season"] == season][["Slot", "StrongSeed", "WeakSeed"]].copy()
+    rem = slots.set_index("Slot")[["StrongSeed", "WeakSeed"]].to_dict(orient="index")
+    ordered: list[str] = []
+    avail = set(seed_to_team.keys())
+    while rem:
+        moved = False
+        for slot in list(rem.keys()):
+            a = str(rem[slot]["StrongSeed"])
+            b = str(rem[slot]["WeakSeed"])
+            if a in avail and b in avail:
+                ordered.append(slot)
+                avail.add(slot)
+                del rem[slot]
+                moved = True
+        if not moved:
+            break
+    slot_map = slots.set_index("Slot")[["StrongSeed", "WeakSeed"]].to_dict(orient="index")
+
+    # Depth -> round label
+    depth = {}
+    for slot in ordered:
+        a = str(slot_map[slot]["StrongSeed"])
+        b = str(slot_map[slot]["WeakSeed"])
+        da = 0 if a in seed_to_team else depth.get(a, 0)
+        db = 0 if b in seed_to_team else depth.get(b, 0)
+        depth[slot] = 1 + max(da, db)
+    uniq = sorted(set(depth.values()))
+    stage_map = {d: ADV_STAGES[min(i, len(ADV_STAGES)-1)] for i, d in enumerate(uniq)}
+    round_map = {slot: stage_map.get(depth.get(slot, 1), "Round 1") for slot in slot_map}
+
+    pair_cache = {}
+    seeded = sorted(set(seed_to_team.values()))
+    if model is not None and required:
         rows, keys = [], []
-        for a, b in itertools.combinations(seeded_teams, 2):
+        for a, b in itertools.combinations(seeded, 2):
             frow, err = build_feature_row(a, b, season_ctx)
             if err is not None:
                 continue
-            if any((f not in frow) or pd.isna(frow[f]) for f in required_features):
+            if any((f not in frow) or pd.isna(frow[f]) for f in required):
                 continue
-            rows.append({f: frow[f] for f in required_features})
+            rows.append({f: frow[f] for f in required})
             keys.append((a, b))
         if rows:
-            x = pd.DataFrame(rows, columns=required_features)
+            x = pd.DataFrame(rows, columns=required)
             p1 = predict_team1_win_prob(model, x)
             for i, key in enumerate(keys):
                 pair_cache[key] = float(p1[i])
 
     rng = np.random.default_rng(42)
-    adv_counts = {tid: {s: 0 for s in ADV_STAGES} for tid in seeded_teams}
-    matchup_counts = defaultdict(int)
-    matchup_p_sum = defaultdict(float)
-    matchup_upset_sum = defaultdict(float)
+    adv = {tid: {s: 0 for s in ["R32", "S16", "E8", "F4", "TitleGame", "Champion"]} for tid in seeded}
+    round_to_adv = {
+        "Round 1": "R32",
+        "Round 2": "S16",
+        "Sweet 16": "E8",
+        "Elite 8": "F4",
+        "Final Four": "TitleGame",
+        "Championship": "Champion",
+    }
+    match_ct = defaultdict(int)
+    match_p = defaultdict(float)
+    match_upset = defaultdict(float)
 
     for _ in range(n_sims):
-        winners_by_slot: dict[str, int] = {}
+        winners = {}
         for slot in ordered:
-            strong = str(slot_map[slot]["StrongSeed"])
-            weak = str(slot_map[slot]["WeakSeed"])
-            team_a = seed_to_team.get(strong, winners_by_slot.get(strong))
-            team_b = seed_to_team.get(weak, winners_by_slot.get(weak))
-            if team_a is None or team_b is None:
+            a_t = str(slot_map[slot]["StrongSeed"])
+            b_t = str(slot_map[slot]["WeakSeed"])
+            ta = seed_to_team.get(a_t, winners.get(a_t))
+            tb = seed_to_team.get(b_t, winners.get(b_t))
+            if ta is None or tb is None:
                 continue
-
-            t1, t2 = (team_a, team_b) if team_a < team_b else (team_b, team_a)
+            t1, t2 = (ta, tb) if ta < tb else (tb, ta)
             if model is not None and (t1, t2) in pair_cache:
-                p_team1 = pair_cache[(t1, t2)]
-                p_a, _ = map_pair_probs(team_a, team_b, p_team1)
+                p1 = pair_cache[(t1, t2)]
+                p_a, _ = map_pair_probs(ta, tb, p1)
             else:
-                seed_a = season_ctx.seed_lookup.get(team_a, np.nan)
-                seed_b = season_ctx.seed_lookup.get(team_b, np.nan)
-                p_a = _heuristic_p_team_a(seed_a, seed_b)
-
+                p_a = _heuristic_prob(seed_lookup.get(ta, np.nan), seed_lookup.get(tb, np.nan))
             p_adj = apply_temperature_scaling(p_a, randomness)
-            winner = team_a if rng.random() < p_adj else team_b
-            winners_by_slot[slot] = winner
+            winner = ta if rng.random() < p_adj else tb
+            winners[slot] = winner
 
-            round_name = round_map[slot]
-            if round_name in ADV_STAGES:
-                adv_counts[winner][round_name] += 1
+            adv_col = round_to_adv.get(round_map.get(slot, "Round 1"))
+            if adv_col:
+                adv[winner][adv_col] += 1
 
-            can_a, can_b = (team_a, team_b) if team_a < team_b else (team_b, team_a)
-            p_can_a = p_a if team_a == can_a else 1.0 - p_a
-            upset = _pair_upset_prob(can_a, can_b, p_can_a, season_ctx)
-            key = (round_name, can_a, can_b)
-            matchup_counts[key] += 1
-            matchup_p_sum[key] += p_can_a
-            matchup_upset_sum[key] += upset if pd.notna(upset) else 0.0
+            ca, cb = (ta, tb) if ta < tb else (tb, ta)
+            p_ca = p_a if ta == ca else 1.0 - p_a
+            sa, sb = seed_lookup.get(ca), seed_lookup.get(cb)
+            if sa is None or sb is None:
+                upset = np.nan
+            elif sa > sb:
+                upset = p_ca
+            elif sb > sa:
+                upset = 1.0 - p_ca
+            else:
+                upset = np.nan
+            key = (round_map.get(slot, "Round 1"), ca, cb)
+            match_ct[key] += 1
+            match_p[key] += p_ca
+            match_upset[key] += upset if pd.notna(upset) else 0.0
 
     adv_rows = []
-    for tid in seeded_teams:
-        row = {
-            "TeamID": tid,
-            "TeamName": season_ctx.team_id_to_name.get(tid, f"Team {tid}"),
-            "SeedNum": season_ctx.seed_lookup.get(tid, np.nan),
-        }
-        for s in ADV_STAGES:
-            row[f"P_{s}"] = adv_counts[tid][s] / n_sims
+    for tid in seeded:
+        row = {"TeamID": tid, "TeamName": names.get(tid, f"Team {tid}"), "SeedNum": seed_lookup.get(tid, np.nan)}
+        for col in ["R32", "S16", "E8", "F4", "TitleGame", "Champion"]:
+            row[f"P_{col}"] = adv[tid][col] / n_sims
         adv_rows.append(row)
     adv_df = pd.DataFrame(adv_rows).sort_values("P_Champion", ascending=False).reset_index(drop=True)
 
-    matchup_rows = []
-    for (rnd, a, b), ct in matchup_counts.items():
-        matchup_rows.append(
+    match_rows = []
+    for (rnd, a, b), ct in match_ct.items():
+        match_rows.append(
             {
                 "Round": rnd,
-                "TeamAName": season_ctx.team_id_to_name.get(a, f"Team {a}"),
-                "TeamBName": season_ctx.team_id_to_name.get(b, f"Team {b}"),
+                "TeamA": names.get(a, f"Team {a}"),
+                "TeamB": names.get(b, f"Team {b}"),
                 "Frequency": ct,
-                "AvgWinProbTeamA": matchup_p_sum[(rnd, a, b)] / ct,
-                "AvgUpsetProb": matchup_upset_sum[(rnd, a, b)] / ct,
+                "AvgWinProbTeamA": match_p[(rnd, a, b)] / ct,
+                "AvgUpsetProb": match_upset[(rnd, a, b)] / ct,
             }
         )
-    matchup_df = pd.DataFrame(matchup_rows).sort_values("Frequency", ascending=False).reset_index(drop=True)
-    return adv_df, matchup_df
+    match_df = pd.DataFrame(match_rows).sort_values("Frequency", ascending=False).reset_index(drop=True)
+    return adv_df, match_df

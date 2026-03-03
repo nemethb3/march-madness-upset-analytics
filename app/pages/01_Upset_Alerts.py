@@ -2,59 +2,103 @@
 
 from __future__ import annotations
 
-from components.bootstrap import ensure_repo_root_on_path
+import sys
+from pathlib import Path
 
-ensure_repo_root_on_path()
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
+import numpy as np
 import pandas as pd
 import streamlit as st
 
 from components.charts import upset_bar_chart, upset_histogram
 from components.io import build_round1_df, render_sidebar, score_round1_matchups
 
-st.set_page_config(page_title="Upset Alerts", page_icon="🚨", layout="wide")
+st.set_page_config(page_title="March Madness Analytics", page_icon="🏀", layout="wide")
 ctx = render_sidebar()
 
-st.title("Round 1 Upset Alerts")
+st.title("Upset Alerts")
+st.subheader("Round 1 Alerts")
 
 round1 = build_round1_df(ctx)
-scored = score_round1_matchups(round1, ctx, top_k=3)
-
 if round1.empty:
-    st.warning("No Round 1 slots found for this season.")
+    st.error("Round 1 matchups are not available for this season bundle.")
     st.stop()
 
-filters_col1, filters_col2 = st.columns([2, 1])
-seed_pairs = sorted([x for x in scored["SeedPair"].dropna().unique().tolist()])
-selected_pairs = filters_col1.multiselect("Filter by seed matchup", options=seed_pairs, default=seed_pairs)
-alerts_only = filters_col2.checkbox("Alerts only", value=False)
+scored = score_round1_matchups(round1, ctx, top_k=5)
+scored = scored[scored["Error"] == ""].copy()
+if scored.empty:
+    st.error("No valid matchups could be scored for this season bundle.")
+    st.stop()
 
-view = scored.copy()
-if selected_pairs:
-    view = view[view["SeedPair"].isin(selected_pairs)]
-if alerts_only:
-    view = view[view["UpsetProb"] >= ctx["upset_threshold"]]
+def _alert_level(p: float) -> str:
+    if p >= 0.30:
+        return "High"
+    if p >= 0.20:
+        return "Medium"
+    if p >= 0.15:
+        return "Watch"
+    return "Low"
 
-tabs = st.tabs(["Table", "Charts"])
+
+scored["AlertLevel"] = scored["UpsetProb"].map(_alert_level)
+scored["SeedMatchup"] = scored.apply(
+    lambda r: f"{min(int(r['TeamASeedNum']), int(r['TeamBSeedNum']))} vs {max(int(r['TeamASeedNum']), int(r['TeamBSeedNum']))}",
+    axis=1,
+)
+
+f1, f2 = st.columns([2, 1])
+seed_options = sorted(scored["SeedMatchup"].unique().tolist())
+seed_filter = f1.multiselect("Seed matchup filter", options=seed_options, default=seed_options)
+level_filter = f2.multiselect("Alert level", options=["High", "Medium", "Watch", "Low"], default=["High", "Medium", "Watch"])
+
+view = scored[scored["SeedMatchup"].isin(seed_filter) & scored["AlertLevel"].isin(level_filter)].copy()
+view = view.sort_values("UpsetProb", ascending=False)
+
+tabs = st.tabs(["Alert Cards", "Charts"])
 
 with tabs[0]:
-    st.dataframe(view.sort_values("UpsetProb", ascending=False), use_container_width=True, hide_index=True)
+    if view.empty:
+        st.info("No games match your current filters.")
+    for _, row in view.iterrows():
+        underdog = row["Underdog"]
+        favorite = row["Favorite"]
+        underdog_seed = int(row["UnderdogSeed"])
+        favorite_seed = int(row["FavoriteSeed"])
+        level = row["AlertLevel"]
+        level_icon = {"High": "🚨", "Medium": "⚠️", "Watch": "👀", "Low": "•"}[level]
+        reasons = row["Reasons"] if isinstance(row["Reasons"], list) else []
+
+        with st.container(border=True):
+            st.markdown(f"### {level_icon} Upset Alert")
+            st.markdown(f"**({underdog_seed}) {underdog} vs ({favorite_seed}) {favorite}**")
+            st.markdown(f"**Upset chance:** {float(row['UpsetProb']):.1%}  \n**Alert level:** {level}")
+            st.markdown(f"**Why {underdog} could win:**")
+            for reason in reasons[:5]:
+                st.markdown(f"- {reason}")
+
+    export_cols = ["Favorite", "Underdog", "FavoriteSeed", "UnderdogSeed", "UpsetProb", "AlertLevel", "Reasons"]
+    export_df = view[export_cols].copy()
+    export_df["Reasons"] = export_df["Reasons"].apply(lambda x: "; ".join(x) if isinstance(x, list) else "")
     st.download_button(
-        "Download alerts CSV",
-        data=view.to_csv(index=False).encode("utf-8"),
-        file_name=f"{ctx['season']}_round1_upset_alerts.csv",
+        "Export upset alerts CSV",
+        export_df.to_csv(index=False).encode("utf-8"),
+        file_name=f"{ctx['season']}_upset_alerts.csv",
         mime="text/csv",
     )
 
 with tabs[1]:
-    chart_df = view[view["Error"] == ""].copy()
-    if chart_df.empty:
-        st.info("No scored rows available for charts.")
-    else:
-        st.plotly_chart(upset_bar_chart(chart_df), use_container_width=True)
-        st.plotly_chart(upset_histogram(chart_df), use_container_width=True)
+    top10 = view.nlargest(10, "UpsetProb")
+    if not top10.empty:
+        st.plotly_chart(upset_bar_chart(top10.rename(columns={"Underdog": "TeamAName", "Favorite": "TeamBName"})), use_container_width=True)
+    hist_df = view[["UpsetProb"]].copy()
+    if not hist_df.empty:
+        st.plotly_chart(upset_histogram(hist_df), use_container_width=True)
 
 with st.expander("What does this mean?"):
     st.write(
-        "Upset probability is the chance the worse-seeded team wins. Sort by UpsetProb to find the most likely upsets."
+        "These cards rank the most plausible Round 1 upsets. Higher upset chance means the underdog has a stronger path to winning."
     )
+
