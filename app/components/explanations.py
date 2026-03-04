@@ -102,7 +102,7 @@ def build_underdog_reasons(
         diff = float(u_val) - float(f_val)
         favor_score = diff * direction
         if favor_score > 0:
-            candidates.append((abs(favor_score), label))
+            candidates.append((abs(favor_score), f"{label} ({favor_score:+.3f})"))
 
     # Prefer stronger effects first, deduplicating label text.
     candidates.sort(key=lambda x: x[0], reverse=True)
@@ -125,4 +125,3 @@ def build_underdog_reasons(
                 break
 
     return reasons[: max(4, min(max_reasons, 5))]
-

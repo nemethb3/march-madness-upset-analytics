@@ -1,179 +1,102 @@
-# APP STATE + FIX Audit Report
+# APP_AUDIT_REPORT
 
-Generated on: 2026-03-03 (America/New_York)
+Generated: 2026-03-03
 
-## 1) Current Project Structure
+## Scope
+Audit focused on season switching, bundle loading, Upset Alerts data flow, Bracket Builder state, and simulation state isolation.
 
-### Top-level tree
-```text
-march-madness-upset-analytics/
-├─ app/
-├─ data/
-├─ notebooks/
-├─ outputs/
-├─ src/
-├─ tools/
-├─ .gitignore
-├─ analysis.ipynb
-├─ README.md
-├─ requirements.txt
-├─ run_bracket_analysis.py
-└─ run_pipeline.py
-```
+## Findings
 
-### `app/` tree
-```text
-app/
-├─ streamlit_app.py
-├─ __init__.py
-├─ components/
-│  ├─ bootstrap.py
-│  ├─ charts.py
-│  ├─ data_registry.py
-│  ├─ explanations.py
-│  ├─ io.py
-│  ├─ text.py
-│  └─ __init__.py
-├─ demo_data/
-│  ├─ demo_seeds.csv
-│  ├─ demo_slots.csv
-│  └─ demo_team_features.csv
-└─ pages/
-   ├─ 01_Upset_Alerts.py
-   ├─ 02_Bracket_Builder.py
-   └─ 03_Simulations.py
-```
+### 1) Season switch state contamination existed
+- `Season` selector was not managed as a single canonical `st.session_state["season"]`.
+- Dependent page states (`bracket_picks`, `sim_adv_df`, `sim_matchup_df`, alert filter widget state) were not reset on season change.
+- Result: stale outputs could persist across season changes.
 
-### `src/` tree
-```text
-src/
-├─ build_advanced_team_season_features.py
-├─ build_conference_features.py
-├─ build_massey_features.py
-├─ build_round1_from_slots.py
-├─ build_team_season_features.py
-├─ build_tourney_matchups.py
-├─ config.py
-├─ evaluate.py
-├─ historical_upset_rates.py
-├─ inference_utils.py
-├─ io_utils.py
-├─ predict_matchups.py
-├─ simulate_tournament.py
-├─ train_models.py
-├─ upset_alerts.py
-└─ __init__.py
-```
+### 2) Cache keys were incomplete for data freshness
+- Bundle cache previously keyed only by `season`.
+- If season files changed in-place, cache could remain stale.
 
-### `data/app/` tree
-```text
-data/app/
-├─ team_id_map.csv
-├─ 2025/
-│  ├─ seeds.csv
-│  ├─ slots.csv
-│  └─ team_features.csv
-└─ 2026/
-   ├─ README_demo.txt
-   ├─ seeds.csv
-   ├─ slots.csv
-   └─ team_features.csv
-```
+### 3) Simulation page stale display risk
+- Simulation results were stored in session state without season tagging.
+- Switching season could show previous season simulation outputs until rerun.
 
-## 2) Bundle Inventory and Required File Check
+### 4) Upset Alerts normalization/filtering needed hardening
+- NaN-safe normalization was added earlier, but this audit confirmed filter/state behavior needed tighter season isolation.
+- Filter options are now derived from full season-scoped dataset and no longer from filtered views.
 
-Required files per season bundle:
-- `seeds.csv`
-- `slots.csv`
-- `team_features.csv`
-- global: `data/app/team_id_map.csv`
+## Changes Applied
 
-Detected seasons under `data/app/`:
-- `2025`
-- `2026`
+### Centralized, season-isolated bundle loading
+- Updated [`app/components/data_registry.py`](/c:/Users/brend/Downloads/March_ML_Mania_2026/march-madness-upset-analytics/app/components/data_registry.py):
+  - Added `get_bundle_paths(season)`.
+  - Added `bundle_cache_token(season)` based on file mtimes/sizes.
+  - Hardened `load_season_bundle(season)`:
+    - strict required file checks
+    - schema validation
+    - season column enforcement/filtering to selected season only
+    - type coercion for TeamID fields
+    - deterministic deduping
 
-### Season 2025
-- Present files: `seeds.csv`, `slots.csv`, `team_features.csv`
-- Required file presence: PASS
-- Bracket readiness: FAIL (only partial demo; does not support full Round 1 slate)
+### Cache key fixes
+- Updated [`app/components/io.py`](/c:/Users/brend/Downloads/March_ML_Mania_2026/march-madness-upset-analytics/app/components/io.py):
+  - `cached_load_bundle(season, cache_token)` now takes season + bundle token.
+  - `run_simulation_cached(...)` now includes `bundle_cache_token` in signature.
 
-### Season 2026
-- Present files: `seeds.csv`, `slots.csv`, `team_features.csv`, `README_demo.txt`
-- Required file presence: PASS
-- Bracket readiness: PASS
+### Single source of truth for season + reset on season change
+- Updated [`app/components/io.py`](/c:/Users/brend/Downloads/March_ML_Mania_2026/march-madness-upset-analytics/app/components/io.py):
+  - season selector uses `st.session_state["season_selector"]`.
+  - canonical season set to `st.session_state["season"]`.
+  - on-change callback clears dependent state:
+    - `alerts_selected_seed_pairs`
+    - `alerts_selected_levels`
+    - `alerts_show_all_games`
+    - `bracket_picks`
+    - `sim_adv_df`, `sim_matchup_df`, `sim_cache_season`
 
-## 3) 2026 Bundle Validation Details
+### Debug mode + deterministic diagnostics
+- Added sidebar `Debug mode` checkbox in `render_sidebar`.
+- Debug expanders on Upset Alerts, Bracket Builder, Simulations are shown only in debug mode.
 
-- `seeds.csv` rows: **64**
-- unique `TeamID` in `seeds.csv`: **64**
-- `team_features.csv` rows: **64**
-- unique `TeamID` in `team_features.csv`: **64**
-- `slots.csv` rows: **63**
-- Round 1 resolvable games from slots+seeds: **32**
-- First Four support: **No**
+### Upset Alerts flow hardened
+- Updated [`app/pages/01_Upset_Alerts.py`](/c:/Users/brend/Downloads/March_ML_Mania_2026/march-madness-upset-analytics/app/pages/01_Upset_Alerts.py):
+  - canonical full dataframe (`full_df`) for filter options/charts.
+  - filtered dataframe (`view_df`) for display only.
+  - seed options always from `full_df["SeedPair"]`.
+  - robust empty-state explanation with counts at each filter stage (debug mode).
+  - NaN-safe seed normalization retained.
 
-### First Four banner
-The 2026 demo bundle is currently a **64-team synthetic bracket** (no First Four).  
-Reason: local source slot structure available for generation was incomplete (`data/app/2025/slots.csv` had only 7 rows), and `data/raw/MNCAATourneySlots.csv` was not present locally. Generator now falls back to a complete 63-slot standard bracket and documents this in `data/app/2026/README_demo.txt`.
+### Bracket/Sim pages season consistency
+- Updated [`app/pages/02_Bracket_Builder.py`](/c:/Users/brend/Downloads/March_ML_Mania_2026/march-madness-upset-analytics/app/pages/02_Bracket_Builder.py): debug expander for season-specific shapes.
+- Updated [`app/pages/03_Simulations.py`](/c:/Users/brend/Downloads/March_ML_Mania_2026/march-madness-upset-analytics/app/pages/03_Simulations.py):
+  - pass `bundle_cache_token` to cached simulation function.
+  - clear simulation outputs when `sim_cache_season != current season`.
 
-## 4) Exact Validation Command Output (2026)
+### Reason quality
+- Updated [`app/components/explanations.py`](/c:/Users/brend/Downloads/March_ML_Mania_2026/march-madness-upset-analytics/app/components/explanations.py):
+  - reasons now include numeric delta signal in text, improving per-matchup variation.
+
+## Validation Evidence
 
 Command:
 ```bash
-python tools/validate_bundle.py --season 2026
+python scripts/validate_app_state.py --season 2026 --check_secondary
 ```
 
-Output:
-```text
-VALIDATE BUNDLE season=2026
-app_dir=data\app
+Output summary:
+- 2026:
+  - seeds unique teams: 64 (PASS)
+  - round1 resolved games: 32 (PASS)
+  - alerts required columns: PASS
+  - seed pair options count: 8 (PASS)
+  - reason diversity: 32 unique sets (PASS)
+- 2025:
+  - partial bundle warnings (8-team demo), no crashes.
 
-[PASS] file:seeds path=data\app\2026\seeds.csv
-[PASS] file:slots path=data\app\2026\slots.csv
-[PASS] file:team_features path=data\app\2026\team_features.csv
-[PASS] file:team_id_map path=data\app\team_id_map.csv
-[PASS] schema:seeds.csv missing=[]
-[PASS] schema:slots.csv missing=[]
-[PASS] schema:team_features.csv missing=[]
-[PASS] schema:team_id_map.csv missing=[]
+Additional direct check:
+- 2026 full Round 1 scored rows: 32
+- seed pairs present: all 8 (`1 vs 16` ... `8 vs 9`)
+- threshold filtering changes `view_df` size while options remain complete.
 
-counts.seeds_rows=64
-counts.seeds_unique_teams=64
-counts.team_features_rows=64
-counts.team_features_unique_teams=64
-counts.slots_rows=63
-counts.team_id_map_rows=381
-round1.total_seed_seed_slots=32
-round1.resolved_games=32
-round1.seed_pair_types=['1 vs 16', '2 vs 15', '3 vs 14', '4 vs 13', '5 vs 12', '6 vs 11', '7 vs 10', '8 vs 9']
-first_four_supported=False
-[PASS] coverage.seeded_teams_in_features missing_count=0
-coverage.extra_feature_team_ids_count=0
-[PASS] round1 resolved games >= 32
-
-RESULT: PASS
-```
-
-## 5) What Was Wrong, What Changed, What Is Now True
-
-### What was wrong
-- Demo source bundle for 2025 was incomplete (8 seeds, 7 slots), so deriving 2026 from it could be misleading.
-- There was no dedicated bundle validator script for quick PASS/FAIL readiness checks.
-- App sidebar logic could silently fall back to another season on bundle errors, which hides missing-file issues for selected season.
-
-### What I changed
-- Added `tools/validate_bundle.py` to validate required files, schema, row counts, team-feature coverage, Round 1 resolvability, and First Four support.
-- Reworked `tools/generate_demo_season.py`:
-  - attempts to copy full slot structure from raw first, then bundle source.
-  - if source slots are incomplete, falls back to a complete 63-slot 64-team bracket.
-  - generates deterministic synthetic seeds/features with `--seed`.
-  - enforces 1:1 feature coverage for seeded teams.
-  - writes `data/app/2026/README_demo.txt` with generation mode details.
-- Updated `app/components/io.py` sidebar loading behavior:
-  - selected season bundle errors now show a friendly error and `st.stop()` (no silent fallback).
-
-### What is now true
-- `data/app/2026` is complete and bracket-ready for app use.
-- 2026 validates with PASS and supports a full 32-game Round 1 slate.
-- Bundle health can now be checked reproducibly via:
-  - `python tools/validate_bundle.py --season 2026`
+## Residual Notes
+- `data/app/2025` remains intentionally partial demo data; season switching is stable, but 2025 has fewer matchups by design.
+- 2026 demo bundle is full bracket-ready and validated.

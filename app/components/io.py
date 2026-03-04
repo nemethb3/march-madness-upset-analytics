@@ -14,7 +14,7 @@ import pandas as pd
 import streamlit as st
 
 from components.bootstrap import ensure_repo_root_on_path
-from components.data_registry import BundleMissingError, list_available_seasons, load_season_bundle
+from components.data_registry import BundleMissingError, bundle_cache_token, list_available_seasons, load_season_bundle
 from components.explanations import build_underdog_reasons
 
 ensure_repo_root_on_path()
@@ -34,13 +34,36 @@ from src.inference_utils import (
 ADV_STAGES = ["Round 1", "Round 2", "Sweet 16", "Elite 8", "Final Four", "Championship"]
 SEED_CODE_PATTERN = re.compile(r"^[WXYZ][0-9]{2}[ab]?$")
 ROUND1_TEMPLATE = [(1, 16), (8, 9), (5, 12), (4, 13), (6, 11), (3, 14), (7, 10), (2, 15)]
+SEASON_RESET_KEYS = [
+    "alerts_selected_seed_pairs",
+    "alerts_selected_levels",
+    "alerts_show_all_games",
+    "bracket_picks",
+    "sim_adv_df",
+    "sim_matchup_df",
+    "sim_cache_season",
+]
 
 
 @st.cache_data
-def cached_load_bundle(season: int):
+def cached_load_bundle(season: int, cache_token: str):
     """Load season bundle with caching."""
+    _ = cache_token
     bundle = load_season_bundle(season)
     return bundle.seeds, bundle.slots, bundle.team_features, bundle.team_id_map
+
+
+def _on_season_change() -> None:
+    """Reset dependent state when season changes."""
+    selected = st.session_state.get("season_selector")
+    if selected is None:
+        return
+    prev = st.session_state.get("season")
+    st.session_state["season"] = int(selected)
+    if prev is None or int(prev) == int(selected):
+        return
+    for key in SEASON_RESET_KEYS:
+        st.session_state.pop(key, None)
 
 
 @st.cache_resource
@@ -92,11 +115,20 @@ def render_sidebar() -> dict[str, Any]:
         st.error("No season bundles found in data/app/{season}.")
         st.stop()
 
-    season = st.sidebar.selectbox("Season", options=available, index=len(available) - 1)
+    default_season = int(st.session_state.get("season", available[-1]))
+    if default_season not in available:
+        default_season = available[-1]
+    if "season_selector" not in st.session_state:
+        st.session_state["season_selector"] = default_season
+    st.sidebar.selectbox("Season", options=available, key="season_selector", on_change=_on_season_change)
+    season = int(st.session_state.get("season_selector", default_season))
+    st.session_state["season"] = season
 
     mode = "Bundle Mode"
     try:
-        seeds_df, slots_df, team_features_df, team_id_map = cached_load_bundle(season)
+        cache_token = bundle_cache_token(season)
+        seeds_df, slots_df, team_features_df, team_id_map = cached_load_bundle(season, cache_token)
+        bundle = load_season_bundle(season)
     except BundleMissingError as exc:
         st.error(f"Season {season} bundle is incomplete: {exc}")
         st.stop()
@@ -125,6 +157,7 @@ def render_sidebar() -> dict[str, Any]:
     risk_tolerance = st.sidebar.slider("Risk tolerance", min_value=0.0, max_value=1.0, value=0.5, step=0.05)
     effort = st.sidebar.selectbox("Simulation effort", options=["Fast", "Balanced", "Thorough"], index=1)
     n_sims = min(_n_sims_from_effort(effort), 50000)
+    debug_mode = st.sidebar.checkbox("Debug mode", value=bool(st.session_state.get("debug_mode", False)), key="debug_mode")
 
     teams_df = team_id_map[["TeamID", "TeamName"]].copy()
     season_ctx = build_season_context_from_frames(
@@ -137,11 +170,14 @@ def render_sidebar() -> dict[str, Any]:
     status = {
         "model_loaded": model_loaded,
         "season_bundle_loaded": True,
+        "season": season,
         "feature_rows": len(team_features_df[team_features_df["Season"] == season]),
         "seed_rows": len(seeds_df[seeds_df["Season"] == season]),
         "slot_rows": len(slots_df[slots_df["Season"] == season]),
         "mode": mode,
         "model_file": str(model_path) if model_path else "None",
+        "bundle_paths": {k: str(v) for k, v in bundle.paths.items()},
+        "bundle_cache_token": cache_token,
     }
     with st.sidebar.expander("Backend Status"):
         st.write(status)
@@ -161,8 +197,10 @@ def render_sidebar() -> dict[str, Any]:
         "upset_threshold": upset_threshold,
         "risk_tolerance": risk_tolerance,
         "n_sims": n_sims,
+        "debug_mode": debug_mode,
         "season_ctx": season_ctx,
         "backend_status": status,
+        "bundle_cache_token": cache_token,
     }
 
 
@@ -570,6 +608,7 @@ def run_simulation_cached(
     n_sims: int,
     randomness: float,
     model_hash: str,
+    bundle_cache_token: str,
     seeds_df: pd.DataFrame,
     slots_df: pd.DataFrame,
     team_features_df: pd.DataFrame,
@@ -577,6 +616,7 @@ def run_simulation_cached(
     model_path_str: str | None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Run Monte Carlo simulation with cached inputs."""
+    _ = bundle_cache_token
     model = load_cached_model(model_path_str) if model_path_str else None
     required = infer_required_features(model) if model is not None else []
     season_ctx = build_season_context_from_frames(season, seeds_df, team_features_df, teams_df=teams_df)

@@ -161,7 +161,10 @@ if full_df.empty:
     st.stop()
 
 with st.sidebar.expander("Upset Alerts Debug"):
-    st.write({"columns_before_normalize": before_cols, "columns_after_normalize": after_cols, "round1_rows": len(round1)})
+    if ctx.get("debug_mode", False):
+        st.write({"columns_before_normalize": before_cols, "columns_after_normalize": after_cols, "round1_rows": len(round1)})
+    else:
+        st.caption("Enable 'Debug mode' in the sidebar to view diagnostics.")
 
 
 def _alert_level(p: float) -> str:
@@ -184,38 +187,71 @@ if ctx.get("upset_threshold") is not None:
 
 f1, f2 = st.columns([2, 1])
 seed_pair_options = sorted(full_df["SeedPair"].dropna().unique().tolist())
-seed_filter = f1.multiselect("Seed matchup filter", options=seed_pair_options, default=seed_pair_options)
-level_filter = f2.multiselect("Alert level", options=["High", "Medium", "Watch", "Low"], default=["High", "Medium", "Watch"])
+seed_filter = f1.multiselect(
+    "Seed matchup filter",
+    options=seed_pair_options,
+    default=seed_pair_options,
+    key="alerts_selected_seed_pairs",
+)
+level_filter = f2.multiselect(
+    "Alert level",
+    options=["High", "Medium", "Watch", "Low"],
+    default=["High", "Medium", "Watch"],
+    key="alerts_selected_levels",
+)
 
 view_df = full_df.copy()
+count_total = len(view_df)
 if seed_filter:
     view_df = view_df[view_df["SeedPair"].isin(seed_filter)]
+count_after_seed = len(view_df)
 if level_filter:
     view_df = view_df[view_df["AlertLevel"].isin(level_filter)]
+count_after_level = len(view_df)
 if ctx.get("upset_threshold") is not None:
     view_df = view_df[view_df["UpsetProb"] >= float(ctx["upset_threshold"])]
+count_after_threshold = len(view_df)
 view_df = view_df.sort_values("UpsetProb", ascending=False)
 
 tabs = st.tabs(["Upset Alerts", "Charts"])
 
 with tabs[0]:
-    with st.expander("Debug: alerts dataframe"):
-        st.write(
-            {
-                "shape_before_normalize": before_shape,
-                "shape_after_normalize": after_shape,
-                "full_df_shape": full_df.shape,
-                "alerts_df_shape": alerts_df.shape,
-                "view_df_shape": view_df.shape,
-            }
-        )
-        st.write({"na_FavoriteSeed_before_normalize": pre_norm_missing_fav, "na_UnderdogSeed_before_normalize": pre_norm_missing_dog})
-        st.write({"na_FavoriteSeed_final": int(full_df["FavoriteSeed"].isna().sum()), "na_UnderdogSeed_final": int(full_df["UnderdogSeed"].isna().sum())})
-        st.write(full_df["SeedPair"].value_counts().sort_index())
+    if ctx.get("debug_mode", False):
+        with st.expander("Debug: alerts dataframe"):
+            st.write(
+                {
+                    "season": ctx["season"],
+                    "shape_before_normalize": before_shape,
+                    "shape_after_normalize": after_shape,
+                    "full_df_shape": full_df.shape,
+                    "alerts_df_shape": alerts_df.shape,
+                    "view_df_shape": view_df.shape,
+                    "upset_prob_min": float(full_df["UpsetProb"].min()) if not full_df.empty else None,
+                    "upset_prob_max": float(full_df["UpsetProb"].max()) if not full_df.empty else None,
+                }
+            )
+            st.write({"na_FavoriteSeed_before_normalize": pre_norm_missing_fav, "na_UnderdogSeed_before_normalize": pre_norm_missing_dog})
+            st.write(
+                {
+                    "na_FavoriteSeed_final": int(full_df["FavoriteSeed"].isna().sum()),
+                    "na_UnderdogSeed_final": int(full_df["UnderdogSeed"].isna().sum()),
+                }
+            )
+            st.write(full_df["SeedPair"].value_counts().sort_index())
 
     if view_df.empty:
-        st.info("No games match your current filters.")
-    show_df = view_df.head(10).copy()
+        st.info("No games match your current filters. Try selecting more seed pairs/alert levels or lowering the upset threshold.")
+        if ctx.get("debug_mode", False):
+            st.write(
+                {
+                    "counts_total": count_total,
+                    "counts_after_seed_filter": count_after_seed,
+                    "counts_after_alert_filter": count_after_level,
+                    "counts_after_threshold": count_after_threshold,
+                }
+            )
+    show_all = st.checkbox("Show all games", value=False, key="alerts_show_all_games")
+    show_df = view_df.copy() if show_all else view_df.head(10).copy()
     for _, row in show_df.iterrows():
         underdog = row["Underdog"]
         favorite = row["Favorite"]
@@ -233,7 +269,7 @@ with tabs[0]:
             for reason in reasons[:5]:
                 st.markdown(f"- {reason}")
 
-    if len(view_df) > 10:
+    if (not show_all) and len(view_df) > 10:
         with st.expander("Show all games"):
             for _, row in view_df.iloc[10:].iterrows():
                 underdog = row["Underdog"]

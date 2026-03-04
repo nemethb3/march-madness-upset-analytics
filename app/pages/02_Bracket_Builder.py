@@ -44,6 +44,18 @@ if bracket_df.empty:
     st.error("Bracket structure is unavailable for this season bundle.")
     st.stop()
 
+if ctx.get("debug_mode", False):
+    with st.expander("Debug: bracket data"):
+        st.write(
+            {
+                "season": ctx["season"],
+                "seeds_shape": ctx["seeds_df"].shape,
+                "slots_shape": ctx["slots_df"].shape,
+                "team_features_shape": ctx["team_features_df"].shape,
+                "bracket_df_shape": bracket_df.shape,
+            }
+        )
+
 if not view_mode:
     round_order = ["Round 1", "Round 2", "Sweet 16", "Elite 8", "Final Four", "Championship"]
     tabs = st.tabs(round_order)
