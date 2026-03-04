@@ -97,23 +97,11 @@ def render_sidebar() -> dict[str, Any]:
     mode = "Bundle Mode"
     try:
         seeds_df, slots_df, team_features_df, team_id_map = cached_load_bundle(season)
-    except BundleMissingError:
-        demo_season = None
-        for s in sorted(available, reverse=True):
-            try:
-                seeds_df, slots_df, team_features_df, team_id_map = cached_load_bundle(s)
-                demo_season = s
-                break
-            except BundleMissingError:
-                continue
-        if demo_season is None:
-            st.error("No complete season bundles found in data/app/.")
-            st.stop()
-        mode = "Demo Mode"
-        st.warning("Season data not available yet. App running in demo mode.")
-        season = demo_season
+    except BundleMissingError as exc:
+        st.error(f"Season {season} bundle is incomplete: {exc}")
+        st.stop()
     except Exception as exc:
-        st.error(f"Bundle load failed: {exc}")
+        st.error(f"Bundle load failed for season {season}: {exc}")
         st.stop()
 
     st.sidebar.divider()
