@@ -151,12 +151,12 @@ if "Reasons" not in scored.columns:
     scored["Reasons"] = [[] for _ in range(len(scored))]
 
 # Keep full scored dataframe for seed-pair options and charts.
-scored_full = scored[scored["Error"] == ""].copy() if "Error" in scored.columns else scored.copy()
-invalid_count = int((~scored_full["is_valid"]).sum()) if "is_valid" in scored_full.columns else 0
+full_df = scored[scored["Error"] == ""].copy() if "Error" in scored.columns else scored.copy()
+invalid_count = int((~full_df["is_valid"]).sum()) if "is_valid" in full_df.columns else 0
 if invalid_count > 0:
     st.warning(f"Removed {invalid_count} matchup rows with missing/invalid seed values.")
-scored_full = scored_full[scored_full["is_valid"]].copy() if "is_valid" in scored_full.columns else scored_full
-if scored_full.empty:
+full_df = full_df[full_df["is_valid"]].copy() if "is_valid" in full_df.columns else full_df
+if full_df.empty:
     st.error("No valid matchups could be scored for this season bundle.")
     st.stop()
 
@@ -174,25 +174,45 @@ def _alert_level(p: float) -> str:
     return "Low"
 
 
-scored_full["AlertLevel"] = scored_full["UpsetProb"].map(_alert_level)
-scored_full["SeedMatchup"] = scored_full.apply(lambda r: f"{int(r['FavoriteSeed'])} vs {int(r['UnderdogSeed'])}", axis=1)
+full_df["AlertLevel"] = full_df["UpsetProb"].map(_alert_level)
+full_df["SeedMatchup"] = full_df.apply(lambda r: f"{int(r['FavoriteSeed'])} vs {int(r['UnderdogSeed'])}", axis=1)
+
+# Alerts view (filtered) is intentionally separate from full Round 1 scored data.
+alerts_df = full_df.copy()
+if ctx.get("upset_threshold") is not None:
+    alerts_df = alerts_df[alerts_df["UpsetProb"] >= float(ctx["upset_threshold"])].copy()
 
 f1, f2 = st.columns([2, 1])
-seed_options = sorted(scored_full["SeedPair"].dropna().unique().tolist())
+seed_pair_options = sorted(full_df["SeedPair"].dropna().unique().tolist())
+seed_options = seed_pair_options
 seed_filter = f1.multiselect("Seed matchup filter", options=seed_options, default=seed_options)
 level_filter = f2.multiselect("Alert level", options=["High", "Medium", "Watch", "Low"], default=["High", "Medium", "Watch"])
 
-view = scored_full[scored_full["SeedPair"].isin(seed_filter) & scored_full["AlertLevel"].isin(level_filter)].copy()
+view = full_df.copy()
+if seed_filter:
+    view = view[view["SeedPair"].isin(seed_filter)]
+if level_filter:
+    view = view[view["AlertLevel"].isin(level_filter)]
+if ctx.get("upset_threshold") is not None:
+    view = view[view["UpsetProb"] >= float(ctx["upset_threshold"])]
 view = view.sort_values("UpsetProb", ascending=False)
 
 tabs = st.tabs(["Upset Alerts", "Charts"])
 
 with tabs[0]:
     with st.expander("Debug: alerts dataframe"):
-        st.write({"shape_before_normalize": before_shape, "shape_after_normalize": after_shape, "shape_final": scored_full.shape})
+        st.write(
+            {
+                "shape_before_normalize": before_shape,
+                "shape_after_normalize": after_shape,
+                "full_df_shape": full_df.shape,
+                "alerts_df_shape": alerts_df.shape,
+                "view_shape": view.shape,
+            }
+        )
         st.write({"na_FavoriteSeed_before_normalize": pre_norm_missing_fav, "na_UnderdogSeed_before_normalize": pre_norm_missing_dog})
-        st.write({"na_FavoriteSeed_final": int(scored_full["FavoriteSeed"].isna().sum()), "na_UnderdogSeed_final": int(scored_full["UnderdogSeed"].isna().sum())})
-        st.write(scored_full["SeedPair"].value_counts().sort_index())
+        st.write({"na_FavoriteSeed_final": int(full_df["FavoriteSeed"].isna().sum()), "na_UnderdogSeed_final": int(full_df["UnderdogSeed"].isna().sum())})
+        st.write(full_df["SeedPair"].value_counts().sort_index())
 
     if view.empty:
         st.info("No games match your current filters.")
@@ -243,7 +263,7 @@ with tabs[0]:
     )
 
 with tabs[1]:
-    chart_df = scored_full.sort_values("UpsetProb", ascending=False).copy()
+    chart_df = full_df.sort_values("UpsetProb", ascending=False).copy()
     if chart_df.empty:
         st.info("No data available for charts.")
     else:
