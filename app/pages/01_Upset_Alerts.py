@@ -28,7 +28,6 @@ if round1.empty:
     st.stop()
 
 scored = score_round1_matchups(round1, ctx, top_k=5)
-scored = scored[scored["Error"] == ""].copy()
 if scored.empty:
     st.error("No valid matchups could be scored for this season bundle.")
     st.stop()
@@ -95,8 +94,14 @@ after_cols = scored.columns.tolist()
 if "Reasons" not in scored.columns:
     scored["Reasons"] = [[] for _ in range(len(scored))]
 
+# Keep full scored dataframe for seed-pair options and charts.
+scored_full = scored[scored["Error"] == ""].copy() if "Error" in scored.columns else scored.copy()
+if scored_full.empty:
+    st.error("No valid matchups could be scored for this season bundle.")
+    st.stop()
+
 with st.sidebar.expander("Upset Alerts Debug"):
-    st.write({"columns_before_normalize": before_cols, "columns_after_normalize": after_cols})
+    st.write({"columns_before_normalize": before_cols, "columns_after_normalize": after_cols, "round1_rows": len(round1)})
 
 
 def _alert_level(p: float) -> str:
@@ -109,20 +114,24 @@ def _alert_level(p: float) -> str:
     return "Low"
 
 
-scored["AlertLevel"] = scored["UpsetProb"].map(_alert_level)
-scored["SeedMatchup"] = scored.apply(lambda r: f"{int(r['FavoriteSeed'])} vs {int(r['UnderdogSeed'])}", axis=1)
+scored_full["AlertLevel"] = scored_full["UpsetProb"].map(_alert_level)
+scored_full["SeedMatchup"] = scored_full.apply(lambda r: f"{int(r['FavoriteSeed'])} vs {int(r['UnderdogSeed'])}", axis=1)
 
 f1, f2 = st.columns([2, 1])
-seed_options = sorted(scored["SeedMatchup"].dropna().unique().tolist())
+seed_options = sorted(scored_full["SeedPair"].dropna().unique().tolist())
 seed_filter = f1.multiselect("Seed matchup filter", options=seed_options, default=seed_options)
-level_filter = f2.multiselect("Alert level", options=["High", "Medium", "Watch", "Low"], default=["High", "Medium", "Watch", "Low"])
+level_filter = f2.multiselect("Alert level", options=["High", "Medium", "Watch", "Low"], default=["High", "Medium", "Watch"])
 
-view = scored[scored["SeedMatchup"].isin(seed_filter) & scored["AlertLevel"].isin(level_filter)].copy()
+view = scored_full[scored_full["SeedPair"].isin(seed_filter) & scored_full["AlertLevel"].isin(level_filter)].copy()
 view = view.sort_values("UpsetProb", ascending=False)
 
 tabs = st.tabs(["Upset Alerts", "Charts"])
 
 with tabs[0]:
+    with st.expander("Debug: data checks"):
+        st.write({"shape": scored_full.shape})
+        st.write(scored_full["SeedPair"].value_counts().sort_index())
+
     if view.empty:
         st.info("No games match your current filters.")
     show_df = view.head(10).copy()
@@ -144,7 +153,7 @@ with tabs[0]:
                 st.markdown(f"- {reason}")
 
     if len(view) > 10:
-        with st.expander("Show more alerts"):
+        with st.expander("Show all games"):
             for _, row in view.iloc[10:].iterrows():
                 underdog = row["Underdog"]
                 favorite = row["Favorite"]
@@ -172,12 +181,13 @@ with tabs[0]:
     )
 
 with tabs[1]:
-    if view.empty:
-        st.info("No data available for charts with current filters.")
+    chart_df = scored_full.sort_values("UpsetProb", ascending=False).copy()
+    if chart_df.empty:
+        st.info("No data available for charts.")
     else:
-        top10 = view.nlargest(10, "UpsetProb")
+        top10 = chart_df.nlargest(10, "UpsetProb")
         st.plotly_chart(upset_bar_chart(top10), use_container_width=True)
-        hist_df = view[["UpsetProb"]].copy()
+        hist_df = chart_df[["UpsetProb"]].copy()
         st.plotly_chart(upset_histogram(hist_df), use_container_width=True)
 
 with st.expander("What does this mean?"):
