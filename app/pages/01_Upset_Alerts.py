@@ -115,18 +115,18 @@ scored["SeedMatchup"] = scored.apply(lambda r: f"{int(r['FavoriteSeed'])} vs {in
 f1, f2 = st.columns([2, 1])
 seed_options = sorted(scored["SeedMatchup"].dropna().unique().tolist())
 seed_filter = f1.multiselect("Seed matchup filter", options=seed_options, default=seed_options)
-level_filter = f2.multiselect("Alert level", options=["High", "Medium", "Watch", "Low"], default=["High", "Medium", "Watch"])
+level_filter = f2.multiselect("Alert level", options=["High", "Medium", "Watch", "Low"], default=["High", "Medium", "Watch", "Low"])
 
 view = scored[scored["SeedMatchup"].isin(seed_filter) & scored["AlertLevel"].isin(level_filter)].copy()
 view = view.sort_values("UpsetProb", ascending=False)
 
-tabs = st.tabs(["Alert Cards", "Charts"])
+tabs = st.tabs(["Upset Alerts", "Charts"])
 
 with tabs[0]:
     if view.empty:
         st.info("No games match your current filters.")
-
-    for _, row in view.iterrows():
+    show_df = view.head(10).copy()
+    for _, row in show_df.iterrows():
         underdog = row["Underdog"]
         favorite = row["Favorite"]
         underdog_seed = int(row["UnderdogSeed"])
@@ -143,6 +143,24 @@ with tabs[0]:
             for reason in reasons[:5]:
                 st.markdown(f"- {reason}")
 
+    if len(view) > 10:
+        with st.expander("Show more alerts"):
+            for _, row in view.iloc[10:].iterrows():
+                underdog = row["Underdog"]
+                favorite = row["Favorite"]
+                underdog_seed = int(row["UnderdogSeed"])
+                favorite_seed = int(row["FavoriteSeed"])
+                level = row["AlertLevel"]
+                level_icon = {"High": "🚨", "Medium": "⚠️", "Watch": "👀", "Low": "•"}[level]
+                reasons = row["Reasons"] if isinstance(row["Reasons"], list) else []
+                with st.container(border=True):
+                    st.markdown(f"### {level_icon} Upset Alert")
+                    st.markdown(f"**({underdog_seed}) {underdog} vs ({favorite_seed}) {favorite}**")
+                    st.markdown(f"**Upset chance:** {float(row['UpsetProb']):.1%}  \n**Alert level:** {level}")
+                    st.markdown(f"**Why {underdog} could win:**")
+                    for reason in reasons[:5]:
+                        st.markdown(f"- {reason}")
+
     export_cols = ["Favorite", "Underdog", "FavoriteSeed", "UnderdogSeed", "UpsetProb", "AlertLevel", "Reasons"]
     export_df = view[export_cols].copy()
     export_df["Reasons"] = export_df["Reasons"].apply(lambda x: "; ".join(x) if isinstance(x, list) else "")
@@ -154,11 +172,12 @@ with tabs[0]:
     )
 
 with tabs[1]:
-    top10 = view.nlargest(10, "UpsetProb")
-    if not top10.empty:
+    if view.empty:
+        st.info("No data available for charts with current filters.")
+    else:
+        top10 = view.nlargest(10, "UpsetProb")
         st.plotly_chart(upset_bar_chart(top10), use_container_width=True)
-    hist_df = view[["UpsetProb"]].copy()
-    if not hist_df.empty:
+        hist_df = view[["UpsetProb"]].copy()
         st.plotly_chart(upset_histogram(hist_df), use_container_width=True)
 
 with st.expander("What does this mean?"):

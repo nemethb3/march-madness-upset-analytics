@@ -33,6 +33,7 @@ from src.inference_utils import (
 
 ADV_STAGES = ["Round 1", "Round 2", "Sweet 16", "Elite 8", "Final Four", "Championship"]
 SEED_CODE_PATTERN = re.compile(r"^[WXYZ][0-9]{2}[ab]?$")
+ROUND1_TEMPLATE = [(1, 16), (8, 9), (5, 12), (4, 13), (6, 11), (3, 14), (7, 10), (2, 15)]
 
 
 @st.cache_data
@@ -179,12 +180,91 @@ def render_sidebar() -> dict[str, Any]:
 
 def build_round1_df(ctx: dict[str, Any]) -> pd.DataFrame:
     """Build round1 matchups."""
-    return build_round1_matchups_from_frames(
-        slots_df=ctx["slots_df"],
-        seeds_df=ctx["seeds_df"],
+    return build_round1_matchups_from_bracket(
         season=ctx["season"],
+        seeds_df=ctx["seeds_df"],
+        slots_df=ctx["slots_df"],
         teams_df=ctx["teams_df"],
     )
+
+
+def _parse_seed(seed_str: str) -> tuple[str, int]:
+    """Parse seed code into (region, seed_num)."""
+    s = str(seed_str)
+    region = s[0]
+    num_match = re.search(r"\d+", s)
+    if num_match is None:
+        raise ValueError(f"Invalid seed code: {seed_str}")
+    return region, int(num_match.group(0))
+
+
+def build_round1_matchups_from_bracket(
+    season: int,
+    seeds_df: pd.DataFrame,
+    slots_df: pd.DataFrame,
+    teams_df: pd.DataFrame | None,
+) -> pd.DataFrame:
+    """Canonical Round 1 matchup builder from bracket seeds+slots with full-slate fallback."""
+    name_map = {}
+    if teams_df is not None and {"TeamID", "TeamName"}.issubset(teams_df.columns):
+        name_map = dict(zip(teams_df["TeamID"], teams_df["TeamName"]))
+
+    # First try slots-driven extraction.
+    round1 = build_round1_matchups_from_frames(
+        slots_df=slots_df,
+        seeds_df=seeds_df,
+        season=season,
+        teams_df=teams_df,
+    )
+    if not round1.empty and len(round1) >= 32:
+        round1["SeedPair"] = round1.apply(
+            lambda r: f"{min(int(r['TeamASeedNum']), int(r['TeamBSeedNum']))} vs {max(int(r['TeamASeedNum']), int(r['TeamBSeedNum']))}",
+            axis=1,
+        )
+        return round1
+
+    # Fallback: build standard 64-team round1 from seeds only.
+    seed_col = "Seed" if "Seed" in seeds_df.columns else "SeedStr"
+    season_seeds = seeds_df[seeds_df["Season"] == season][[seed_col, "TeamID"]].copy()
+    if season_seeds.empty:
+        return round1
+
+    season_seeds["Region"] = season_seeds[seed_col].astype(str).str[0]
+    season_seeds["SeedNum"] = season_seeds[seed_col].astype(str).str.extract(r"(\d+)").astype(float)
+    season_seeds = season_seeds.dropna(subset=["SeedNum"]).copy()
+    season_seeds["SeedNum"] = season_seeds["SeedNum"].astype(int)
+
+    # Collapse play-in duplicates by keeping deterministic first seed string per (region, seednum).
+    season_seeds = season_seeds.sort_values([seed_col, "TeamID"]).drop_duplicates(subset=["Region", "SeedNum"], keep="first")
+
+    rows: list[dict[str, Any]] = []
+    regions = sorted(season_seeds["Region"].unique().tolist())
+    for region in regions:
+        reg = season_seeds[season_seeds["Region"] == region]
+        by_seed = {int(r["SeedNum"]): int(r["TeamID"]) for _, r in reg.iterrows()}
+        for idx, (a, b) in enumerate(ROUND1_TEMPLATE, start=1):
+            team_a = by_seed.get(a)
+            team_b = by_seed.get(b)
+            rows.append(
+                {
+                    "Season": season,
+                    "Slot": f"R1{region}{idx}",
+                    "Region": region,
+                    "TeamAID": team_a,
+                    "TeamBID": team_b,
+                    "TeamAName": name_map.get(team_a, f"Team {team_a}" if team_a is not None else "TBD play-in"),
+                    "TeamBName": name_map.get(team_b, f"Team {team_b}" if team_b is not None else "TBD play-in"),
+                    "TeamASeedNum": a,
+                    "TeamBSeedNum": b,
+                    "SeedPair": f"{min(a, b)} vs {max(a, b)}",
+                }
+            )
+
+    full = pd.DataFrame(rows).sort_values(["Region", "Slot"]) if rows else pd.DataFrame()
+    if not full.empty:
+        full = full.drop(columns=["Region"])
+        full = full.reset_index(drop=True)
+    return full
 
 
 def _seed_lookup_for_df(seeds_df: pd.DataFrame, season: int) -> dict[int, int]:
