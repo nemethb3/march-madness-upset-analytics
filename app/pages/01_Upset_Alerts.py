@@ -33,6 +33,38 @@ if scored.empty:
     st.stop()
 
 
+def _enforce_alert_seed_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Create/backfill Favorite/Underdog seed schema before normalization."""
+    out = df.copy()
+
+    has_team_seed_schema = {"TeamASeedNum", "TeamBSeedNum", "TeamAName", "TeamBName"}.issubset(out.columns)
+    if has_team_seed_schema:
+        out["TeamASeedNum"] = pd.to_numeric(out["TeamASeedNum"], errors="coerce")
+        out["TeamBSeedNum"] = pd.to_numeric(out["TeamBSeedNum"], errors="coerce")
+
+        team_a_is_fav = out["TeamASeedNum"] <= out["TeamBSeedNum"]
+        out["Favorite"] = np.where(team_a_is_fav, out["TeamAName"], out["TeamBName"])
+        out["Underdog"] = np.where(team_a_is_fav, out["TeamBName"], out["TeamAName"])
+        out["FavoriteSeed"] = np.where(team_a_is_fav, out["TeamASeedNum"], out["TeamBSeedNum"])
+        out["UnderdogSeed"] = np.where(team_a_is_fav, out["TeamBSeedNum"], out["TeamASeedNum"])
+
+        if {"TeamAID", "TeamBID"}.issubset(out.columns):
+            out["FavoriteTeamID"] = np.where(team_a_is_fav, out["TeamAID"], out["TeamBID"])
+            out["UnderdogTeamID"] = np.where(team_a_is_fav, out["TeamBID"], out["TeamAID"])
+
+    if {"FavoriteSeed", "UnderdogSeed"}.issubset(out.columns):
+        out["FavoriteSeed"] = pd.to_numeric(out["FavoriteSeed"], errors="coerce")
+        out["UnderdogSeed"] = pd.to_numeric(out["UnderdogSeed"], errors="coerce")
+        # Backfill from TeamA/TeamB seeds if available.
+        if {"TeamASeedNum", "TeamBSeedNum"}.issubset(out.columns):
+            team_min = out[["TeamASeedNum", "TeamBSeedNum"]].min(axis=1)
+            team_max = out[["TeamASeedNum", "TeamBSeedNum"]].max(axis=1)
+            out["FavoriteSeed"] = out["FavoriteSeed"].fillna(team_min)
+            out["UnderdogSeed"] = out["UnderdogSeed"].fillna(team_max)
+
+    return out
+
+
 def normalize_alerts_df(df: pd.DataFrame) -> pd.DataFrame:
     """Normalize alerts dataframe into a stable schema for UI rendering."""
     out = df.copy()
@@ -49,21 +81,14 @@ def normalize_alerts_df(df: pd.DataFrame) -> pd.DataFrame:
                     np.where(out["Underdog"] == out["TeamBName"], out["P_TeamBWin"], np.nan),
                 )
 
-        if "SeedPair" not in out.columns:
-            out["SeedPair"] = out.apply(
-                lambda r: f"{min(int(r['FavoriteSeed']), int(r['UnderdogSeed']))}-{max(int(r['FavoriteSeed']), int(r['UnderdogSeed']))}",
-                axis=1,
-            )
         if "Season" not in out.columns:
             out["Season"] = ctx["season"]
 
         required = ["Season", "SeedPair", "Favorite", "Underdog", "FavoriteSeed", "UnderdogSeed", "UpsetProb"]
-        out = out[required + [c for c in out.columns if c not in required]]
-        out = out.loc[:, ~out.columns.duplicated()].copy()
-        return out
+        out = out[[c for c in required if c in out.columns] + [c for c in out.columns if c not in required]]
 
     schema_b = {"TeamAName", "TeamBName", "TeamASeedNum", "TeamBSeedNum", "P_TeamAWin", "P_TeamBWin", "WorseSeedTeam"}
-    if schema_b.issubset(out.columns):
+    if not has_schema_a and schema_b.issubset(out.columns):
         out["Underdog"] = out["WorseSeedTeam"]
         out["Favorite"] = np.where(out["Underdog"] == out["TeamAName"], out["TeamBName"], out["TeamAName"])
         out["UnderdogSeed"] = out[["TeamASeedNum", "TeamBSeedNum"]].max(axis=1)
@@ -73,29 +98,64 @@ def normalize_alerts_df(df: pd.DataFrame) -> pd.DataFrame:
             out["P_TeamAWin"],
             np.where(out["Underdog"] == out["TeamBName"], out["P_TeamBWin"], np.nan),
         )
-        if "SeedPair" not in out.columns:
-            out["SeedPair"] = out.apply(lambda r: f"{int(r['FavoriteSeed'])}-{int(r['UnderdogSeed'])}", axis=1)
         if "Season" not in out.columns:
             out["Season"] = ctx["season"]
 
         required = ["Season", "SeedPair", "Favorite", "Underdog", "FavoriteSeed", "UnderdogSeed", "UpsetProb"]
-        out = out[required + [c for c in out.columns if c not in required]]
-        out = out.loc[:, ~out.columns.duplicated()].copy()
-        return out
+        out = out[[c for c in required if c in out.columns] + [c for c in out.columns if c not in required]]
 
-    st.error(f"Upset alerts data missing required columns. Found: {sorted(df.columns.tolist())}")
-    st.stop()
+    # Harden against NaNs in seeds and build SeedPair safely.
+    if "FavoriteSeed" in out.columns:
+        out["FavoriteSeed"] = pd.to_numeric(out["FavoriteSeed"], errors="coerce")
+    else:
+        out["FavoriteSeed"] = np.nan
+    if "UnderdogSeed" in out.columns:
+        out["UnderdogSeed"] = pd.to_numeric(out["UnderdogSeed"], errors="coerce")
+    else:
+        out["UnderdogSeed"] = np.nan
+
+    low = out[["FavoriteSeed", "UnderdogSeed"]].min(axis=1)
+    high = out[["FavoriteSeed", "UnderdogSeed"]].max(axis=1)
+    seed_pair = low.astype("Int64").astype(str) + " vs " + high.astype("Int64").astype(str)
+    invalid_seed = low.isna() | high.isna()
+    seed_pair = seed_pair.where(~invalid_seed, "Unknown")
+    out["SeedPair"] = seed_pair
+    out["is_valid"] = ~invalid_seed
+
+    if "Season" not in out.columns:
+        out["Season"] = ctx["season"]
+    if "UpsetProb" not in out.columns:
+        out["UpsetProb"] = np.nan
+
+    required = ["Season", "SeedPair", "Favorite", "Underdog", "FavoriteSeed", "UnderdogSeed", "UpsetProb", "is_valid"]
+    missing_required = [c for c in ["Favorite", "Underdog"] if c not in out.columns]
+    if missing_required:
+        st.error(f"Upset alerts data missing required columns. Found: {sorted(df.columns.tolist())}")
+        st.stop()
+
+    out = out[[c for c in required if c in out.columns] + [c for c in out.columns if c not in required]]
+    out = out.loc[:, ~out.columns.duplicated()].copy()
+    return out
 
 
 before_cols = scored.columns.tolist()
+before_shape = scored.shape
+scored = _enforce_alert_seed_columns(scored)
+pre_norm_missing_fav = int(pd.to_numeric(scored.get("FavoriteSeed"), errors="coerce").isna().sum()) if "FavoriteSeed" in scored.columns else len(scored)
+pre_norm_missing_dog = int(pd.to_numeric(scored.get("UnderdogSeed"), errors="coerce").isna().sum()) if "UnderdogSeed" in scored.columns else len(scored)
 scored = normalize_alerts_df(scored)
 after_cols = scored.columns.tolist()
+after_shape = scored.shape
 
 if "Reasons" not in scored.columns:
     scored["Reasons"] = [[] for _ in range(len(scored))]
 
 # Keep full scored dataframe for seed-pair options and charts.
 scored_full = scored[scored["Error"] == ""].copy() if "Error" in scored.columns else scored.copy()
+invalid_count = int((~scored_full["is_valid"]).sum()) if "is_valid" in scored_full.columns else 0
+if invalid_count > 0:
+    st.warning(f"Removed {invalid_count} matchup rows with missing/invalid seed values.")
+scored_full = scored_full[scored_full["is_valid"]].copy() if "is_valid" in scored_full.columns else scored_full
 if scored_full.empty:
     st.error("No valid matchups could be scored for this season bundle.")
     st.stop()
@@ -128,8 +188,10 @@ view = view.sort_values("UpsetProb", ascending=False)
 tabs = st.tabs(["Upset Alerts", "Charts"])
 
 with tabs[0]:
-    with st.expander("Debug: data checks"):
-        st.write({"shape": scored_full.shape})
+    with st.expander("Debug: alerts dataframe"):
+        st.write({"shape_before_normalize": before_shape, "shape_after_normalize": after_shape, "shape_final": scored_full.shape})
+        st.write({"na_FavoriteSeed_before_normalize": pre_norm_missing_fav, "na_UnderdogSeed_before_normalize": pre_norm_missing_dog})
+        st.write({"na_FavoriteSeed_final": int(scored_full["FavoriteSeed"].isna().sum()), "na_UnderdogSeed_final": int(scored_full["UnderdogSeed"].isna().sum())})
         st.write(scored_full["SeedPair"].value_counts().sort_index())
 
     if view.empty:
