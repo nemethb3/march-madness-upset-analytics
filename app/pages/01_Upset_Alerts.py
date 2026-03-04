@@ -184,18 +184,17 @@ if ctx.get("upset_threshold") is not None:
 
 f1, f2 = st.columns([2, 1])
 seed_pair_options = sorted(full_df["SeedPair"].dropna().unique().tolist())
-seed_options = seed_pair_options
-seed_filter = f1.multiselect("Seed matchup filter", options=seed_options, default=seed_options)
+seed_filter = f1.multiselect("Seed matchup filter", options=seed_pair_options, default=seed_pair_options)
 level_filter = f2.multiselect("Alert level", options=["High", "Medium", "Watch", "Low"], default=["High", "Medium", "Watch"])
 
-view = full_df.copy()
+view_df = full_df.copy()
 if seed_filter:
-    view = view[view["SeedPair"].isin(seed_filter)]
+    view_df = view_df[view_df["SeedPair"].isin(seed_filter)]
 if level_filter:
-    view = view[view["AlertLevel"].isin(level_filter)]
+    view_df = view_df[view_df["AlertLevel"].isin(level_filter)]
 if ctx.get("upset_threshold") is not None:
-    view = view[view["UpsetProb"] >= float(ctx["upset_threshold"])]
-view = view.sort_values("UpsetProb", ascending=False)
+    view_df = view_df[view_df["UpsetProb"] >= float(ctx["upset_threshold"])]
+view_df = view_df.sort_values("UpsetProb", ascending=False)
 
 tabs = st.tabs(["Upset Alerts", "Charts"])
 
@@ -207,16 +206,16 @@ with tabs[0]:
                 "shape_after_normalize": after_shape,
                 "full_df_shape": full_df.shape,
                 "alerts_df_shape": alerts_df.shape,
-                "view_shape": view.shape,
+                "view_df_shape": view_df.shape,
             }
         )
         st.write({"na_FavoriteSeed_before_normalize": pre_norm_missing_fav, "na_UnderdogSeed_before_normalize": pre_norm_missing_dog})
         st.write({"na_FavoriteSeed_final": int(full_df["FavoriteSeed"].isna().sum()), "na_UnderdogSeed_final": int(full_df["UnderdogSeed"].isna().sum())})
         st.write(full_df["SeedPair"].value_counts().sort_index())
 
-    if view.empty:
+    if view_df.empty:
         st.info("No games match your current filters.")
-    show_df = view.head(10).copy()
+    show_df = view_df.head(10).copy()
     for _, row in show_df.iterrows():
         underdog = row["Underdog"]
         favorite = row["Favorite"]
@@ -234,9 +233,9 @@ with tabs[0]:
             for reason in reasons[:5]:
                 st.markdown(f"- {reason}")
 
-    if len(view) > 10:
+    if len(view_df) > 10:
         with st.expander("Show all games"):
-            for _, row in view.iloc[10:].iterrows():
+            for _, row in view_df.iloc[10:].iterrows():
                 underdog = row["Underdog"]
                 favorite = row["Favorite"]
                 underdog_seed = int(row["UnderdogSeed"])
@@ -253,7 +252,7 @@ with tabs[0]:
                         st.markdown(f"- {reason}")
 
     export_cols = ["Favorite", "Underdog", "FavoriteSeed", "UnderdogSeed", "UpsetProb", "AlertLevel", "Reasons"]
-    export_df = view[export_cols].copy()
+    export_df = view_df[export_cols].copy()
     export_df["Reasons"] = export_df["Reasons"].apply(lambda x: "; ".join(x) if isinstance(x, list) else "")
     st.download_button(
         "Export upset alerts CSV",
