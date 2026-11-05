@@ -1,6 +1,6 @@
 # march-madness-upset-analytics
 
-Resume-quality, reproducible NCAA March Madness upset prediction pipeline using Kaggle March Machine Learning Mania men's compact CSVs.
+NCAA March Madness upset prediction pipeline using Kaggle March Machine Learning Mania men's compact CSVs.
 
 ## Overview
 This project builds a modeling dataset where each row is a men's NCAA tournament game matchup, then trains baseline classifiers to predict whether the lower-ID team (`Team1ID`) wins.
